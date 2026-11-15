@@ -1,0 +1,18 @@
+{
+  "domain": "haven",
+  "name": "Haven",
+  "codeowners": [
+    "@phiph-s"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "mqtt"
+  ],
+  "documentation": "https://github.com/phiph-s/haven-ha",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/phiph-s/haven-ha/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.2.0"
+}

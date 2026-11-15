@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Haven einrichten",
+        "description": "Haven liest Zigbee2MQTT über die MQTT-Verbindung von Home Assistant. Die MQTT-Integration muss eingerichtet sein.",
+        "data": { "base_topic": "Zigbee2MQTT-Basis-Topic" },
+        "data_description": { "base_topic": "Entspricht base_topic in der Zigbee2MQTT-Konfiguration, meist zigbee2mqtt." }
+      }
+    },
+    "error": { "invalid_topic": "Ungültiges Topic. Es darf nicht leer sein und keine Platzhalter (# oder +) enthalten." },
+    "abort": { "single_instance_allowed": "Haven ist bereits eingerichtet." }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Haven-Optionen",
+        "data": { "base_topic": "Zigbee2MQTT-Basis-Topic" },
+        "data_description": { "base_topic": "Entspricht base_topic in der Zigbee2MQTT-Konfiguration, meist zigbee2mqtt." }
+      }
+    },
+    "error": { "invalid_topic": "Ungültiges Topic. Es darf nicht leer sein und keine Platzhalter (# oder +) enthalten." }
+  }
+}

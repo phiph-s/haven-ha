@@ -1,0 +1,94 @@
+[
+ {
+  "entity_id": "light.salon",
+  "state": "on",
+  "attributes": {
+   "supported_color_modes": [
+    "color_temp",
+    "xy"
+   ],
+   "entity_id": [
+    "light.salon_oben_3_medien",
+    "light.salon_oben_4_flur",
+    "light.salon_oben_5_tur",
+    "light.salon_oben_6_flur",
+    "light.lampe_salon",
+    "light.tischlampe_salon"
+   ],
+   "friendly_name": "Salon"
+  }
+ },
+ {
+  "entity_id": "light.ruheraum",
+  "state": "on",
+  "attributes": {
+   "supported_color_modes": [
+    "color_temp",
+    "xy"
+   ],
+   "entity_id": [
+    "light.lichtleiste_links",
+    "light.lichtleiste_rechts",
+    "light.ruheraum_oben_1_tur",
+    "light.ruheraum_oben_2_bett",
+    "light.ruheraum_oben_3_schreibtisch"
+   ],
+   "friendly_name": "Ruheraum"
+  }
+ },
+ {
+  "entity_id": "light.lampe_salon",
+  "state": "on",
+  "attributes": {
+   "supported_color_modes": [
+    "color_temp",
+    "xy"
+   ],
+   "friendly_name": "Lampe Salon"
+  }
+ },
+ {
+  "entity_id": "light.zgsalon",
+  "state": "on",
+  "attributes": {
+   "supported_color_modes": [
+    "color_temp",
+    "xy"
+   ],
+   "group_entities": [
+    "light.salon_oben_1_tur",
+    "light.salon_oben_2_fenster",
+    "light.tischlampe_salon",
+    "light.lampe_salon",
+    "light.lampe_decke_salon",
+    "light.lampe_ruhebett"
+   ],
+   "friendly_name": "ZGSalon"
+  }
+ },
+ {
+  "entity_id": "light.zgkochbereich",
+  "state": "off",
+  "attributes": {
+   "supported_color_modes": [
+    "brightness"
+   ],
+   "group_entities": [
+    "light.kochbereich_arbeitslicht_2",
+    "light.kochbereich_arbeitslicht_1"
+   ],
+   "friendly_name": "ZGKochbereich"
+  }
+ },
+ {
+  "entity_id": "light.zusatzlicht_1",
+  "state": "unavailable",
+  "attributes": {
+   "restored": true,
+   "supported_color_modes": [
+    "brightness"
+   ],
+   "friendly_name": "Zusatzlicht 1"
+  }
+ }
+]

@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag und manifest.json vergleichen
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(python3 -c "import json; print(json.load(open('custom_components/haven/manifest.json'))['version'])")"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Der Tag v$tag passt nicht zur Version $version in custom_components/haven/manifest.json. Version anpassen oder Tag neu setzen."
+            exit 1
+          fi
+
+      - name: haven.zip bauen
+        run: |
+          cd custom_components/haven
+          zip -r ../../haven.zip . -x "__pycache__/*" "*.pyc"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: haven.zip
+          generate_release_notes: true
