@@ -184,7 +184,9 @@ Mit `refresh: true` (nur Admin): Topic `bridge/request/networkmap`, Payload `{ty
 ```
 
 ### `haven/floorplan/get` und `haven/floorplan/set`
-Speicher: `.storage/haven.floorplan` (Store-Version 1, Inhalt `{"plan": {...}, "updated_at": ...}`). `plan` ist das Dokument von `HavenFloorPlan.toJson` der App. Geprüft wird nur: Objekt, `version` (Zahl), `rooms` (Liste, jeder Eintrag mit `id`), `placements` (Liste, jeder Eintrag mit `entityId`). Geometrie prüft die App. Unbekannte Felder im `plan` bleiben unverändert erhalten.
+Speicher: `.storage/haven.floorplan` (Store-Version 1, Inhalt `{"plan": {...}, "updated_at": ...}`). `plan` ist das Dokument von `HavenFloorPlan.toJson` der App. Geprüft wird nur: Objekt, `version` (Zahl), `rooms` (Liste, jeder Eintrag mit `id`), `placements` (Liste, jeder Eintrag mit `entityId`), optional `furniture` (Liste, jeder Eintrag mit `id`). Geometrie prüft die App. Unbekannte Felder im `plan` bleiben unverändert erhalten.
+
+**Möbel** (`furniture`, ab App 0.6, nur Deko): Neue Apps schicken das Feld immer, auch leer. Fehlt es (App bis 0.5), übernimmt Haven die gespeicherten Möbel in den neuen Stand, damit ein älteres Gerät sie beim Speichern nicht löscht. `furniture: []` löscht dagegen alle. Das Schema bleibt Version 2.
 
 Optional (ab 0.3.0) `updated_at` neben `plan`: Text (ISO 8601) oder Zahl (Millisekunden), wird nur durchgereicht und nicht ausgewertet. Fehlt es, nimmt Haven ein vorhandenes Feld `updatedAt` aus dem `plan`, sonst `null`. `get` liefert immer `plan` und `updated_at`. Alte Clients ohne `updated_at` funktionieren unverändert, alte Speicherstände geben `updated_at: null`.
 ```json
@@ -216,16 +218,54 @@ Nach jedem erfolgreichen `haven/floorplan/set`, `haven/widgets/set` und `haven/p
 ```json
 {"event_type": "haven_data_updated", "data": {"kind": "floorplan", "updated_at": "2026-11-15T12:00:00Z"}}
 ```
-- `kind`: `floorplan`, `widgets` oder `prefs`.
+- `kind`: `floorplan`, `widgets`, `prefs` oder `automations` (nach `haven/automations/set|delete`).
 - `updated_at`: nur wenn bekannt (aus dem Befehl, bei Grundriss und Prefs sonst aus dem Feld `updatedAt` des Dokuments), unverändert als Text oder Zahl. Sonst fehlt der Schlüssel.
 - Die App abonniert per `subscribe_events` mit `event_type: "haven_data_updated"`.
 - Einschränkung: HA erlaubt Nicht-Administratoren `subscribe_events` nur für Event-Typen aus der `SUBSCRIBE_ALLOWLIST` von HA. `haven_data_updated` steht nicht darin, das Abo funktioniert also nur mit einem Administrator-Konto (die App nutzt dessen Long-Lived-Token). Das stammt aus dem Wissen über den HA-Quellcode, nicht aus einem Test.
+
+## Haven-Automationen
+Komplexere Abläufe laufen direkt in Haven statt als HA-Automation. Bisher gibt es den Typ `room_knob`: Drehregler und Taster (Z2M-Geräte mit `action`) steuern das Licht eines Raums. `haven/info.features` enthält dann `automations`.
+
+**Modell** (`.storage/haven.automations`, Store-Version 1.2, Migration von 1.1 in `automations.migrate_store`):
+```json
+{"id": "3f9a1c0b2e4d", "type": "room_knob", "name": "Drehregler Salon", "enabled": true,
+ "room_area_id": "salon", "devices": ["0x00124b0000000016"],
+ "options": {"gestures": {"rotate": {"action": "brightness"}, "single": {"action": "toggle"},
+                          "double": {"action": "next_scene"}, "hold": {"action": "scene", "scene": 2}},
+             "scenes": [3, 0, 1], "on_action": "last", "on_scene": null,
+             "step": 35, "transition": 0.2, "min_brightness": 3, "off_at_min": false}}
+```
+- Gesten: `rotate` (`none`, `brightness`), `single`/`double`/`hold` (`none`, `toggle`, `next_scene`, `scene` mit `scene`, `off` = alles aus im Raum).
+- `scenes`: Szenen-IDs der Z2M-Raumgruppe in Umlauf-Reihenfolge, `null` = alle. `on_action`: `last` (zuletzt) oder `scene` (`on_scene`) beim Einschalten per Ein/Aus.
+- `step` 1 bis 255 (von 255), `transition` 0 bis 10 s, `min_brightness` 1 bis 254 (Grenze beim Runterdrehen), `off_at_min`: am Minimum nach links drehen schaltet aus.
+- Ein Gerät darf nur in einer aktiven Automation stecken (`device_taken`). Der Raum braucht eine Z2M-Gruppe oder Lichter (`no_lights`).
+
+**Laufzeit:** Haven hört über die vorhandenen Abos auf `<base>/<friendly_name>` (die Geräte stehen per IEEE in der Automation, eine Umbenennung in Z2M greift mit dem nächsten `bridge/devices`). `action` wird normalisiert, leere Werte ignoriert. Event-Modus: `rotate_left/right`, `single`, `double`, `hold`. Command-Modus: `brightness_step_up/down` = Drehen, `toggle`/`on`/`off` = Drücken, Farbtemperatur- und Farbton-Befehle werden ignoriert. Drehungen: die erste sofort, weitere in einem Fenster von 120 ms zusammengefasst. Befehle gehen per MQTT an die Raumgruppe (`<base>/<Gruppe>/set` mit `brightness_step` und `transition`, `state` `ON`/`OFF` bzw. `TOGGLE` bei unbekanntem Zustand, `scene_recall`). Ohne Gruppe: `light.turn_on` mit `brightness_step`, `light.turn_off`/`light.toggle` auf die Lichter des Raums ohne die ausgenommenen. Der Szenen-Zähler je Raum steht im Speicher und im Store. Jede Geste feuert `haven_automation_triggered` `{id, action, room, room_name, device, source, at}` (`source`: `device` oder `test`).
+
+| Befehl | Payload | Antwort |
+|---|---|---|
+| `haven/automations/list` | – | `{automations: [{..., last_triggered: {at, action}\|null}], rooms: {area_id: {group, group_id, scenes, lights, has_lights}}, device_automations: {ieee: ["automation.x"]}, running}` |
+| `haven/automations/set` (Admin) | `{automation: {...}}` (ohne `id` = neu) | `{ok, automation}` |
+| `haven/automations/delete` (Admin) | `{id}` | `{ok}` |
+| `haven/automations/test` (Admin) | `{id, action}` mit `rotate_left`, `rotate_right`, `single`, `double`, `hold` | `{ok, plan: {action, mqtt, services, scene, note}}` |
+
+`device_automations` nennt je Drehregler/Taster die HA-Automationen, die das Gerät verwenden (`automation.automations_with_device`), damit die App doppelte Auslösung erkennt. Nach `set` und `delete` feuert `haven_data_updated` mit `kind: "automations"`. Fehler: `invalid_format`, `not_found`, `no_lights`, `device_taken`.
+
+## Seitenleisten-Eintrag „Haven“ (Web-App in Home Assistant)
+Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, meldet Haven beim Laden des Config Entries einen Eintrag „Haven“ in der Seitenleiste an. Die App läuft dort direkt in Home Assistant, ohne Token und ohne Onboarding, im Hell- oder Dunkelmodus von HA.
+
+- **Panel:** Custom Panel über `panel_custom.async_register_panel` (`frontend_url_path: haven`, Element `haven-panel`, `module_url: /haven_static/<version>/haven-panel.js`, `embed_iframe: false`, `require_admin: false`). Beim Entladen `frontend.async_remove_panel`. Konfiguration als reine Funktion in `panel.py`, die Anmeldung in `panel_setup.py`. Fehler dabei kosten nur den Eintrag, nicht die Integration.
+- **Dateien:** `hass.http.async_register_static_paths([StaticPathConfig("/haven_static/<version>", frontend/, cache_headers=True)])`. Die Version im Pfad sorgt fürs Cache-Busting, HA darf lange cachen. Statische Pfade lassen sich in HA nicht abmelden, sie bleiben bis zum Neustart.
+- **Anmeldung:** Das Modul `haven-panel.js` liest das Access-Token aus `hass.auth` und gibt es an die App weiter (vor jeder neuen WebSocket-Verbindung frisch, abgelaufene Tokens erneuert es über `hass.auth.refreshAccessToken()`). Der WebSocket ist dieselbe Herkunft (`/api/websocket`). Nicht-Administratoren sehen den Eintrag, schreibende Befehle bleiben wie gehabt Admins vorbehalten.
+- **Abhängigkeiten:** `frontend`, `http`, `panel_custom` (in `manifest.json`).
+- **Build:** In der App `tool/build_ha_panel.sh` ausführen (siehe README der App). Die Version wird aus dieser `manifest.json` gelesen und muss dazu passen, nach jeder neuen Version also neu bauen. Die Dateien sind eingecheckt, sonst fehlen sie bei HACS. Größe etwa 13 MB (CanvasKit 7 MB, App 4 MB, Lizenztexte 1,4 MB).
+- Annahmen zur HA-API sind am Quelltext von HA 2026.2 geprüft, nicht an einem laufenden HA. Falls Tastatur oder Eingabefelder im Panel hängen: `EMBED_IFRAME = True` in `panel.py` (HA lädt das Modul dann in einem iframe).
 
 ## Entwicklung und Tests
 ```
 cd integration && python3 -m pytest -q
 ```
-Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
+Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
 
 Registry-Zugriffe laufen ohne `dev_reg.devices.values()` / `ent_reg.entities.values()` (ab HA 2027.9 veraltet): `haven/rooms` über `async_list_areas`, `dr/er.async_entries_for_area`, `er.async_entries_for_device`, Geräte ohne Bereich über `dr.async_entries_for_config_entry` aller Config-Entries, Lichter ohne Bereich über `hass.states.async_all("light")`. Die HA-Zuordnung der Zigbee-Geräte (`area_id`, `ha_entities`) liest nur Geräte der MQTT-Config-Entries. Geräte ganz ohne Config-Entry fehlen in `unassigned`.
 

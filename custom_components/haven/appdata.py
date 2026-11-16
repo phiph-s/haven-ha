@@ -28,7 +28,33 @@ def validate_floorplan(plan: Any) -> list[str]:
             errors.append(f"{key} ist zu groß")
         elif not all(isinstance(i, dict) and isinstance(i.get(id_key), str) for i in items):
             errors.append(f"{key}: jeder Eintrag braucht ein Feld {id_key}")
+    # Möbel (ab App 0.6) sind optional und nur Deko: Liste von Objekten mit id.
+    if "furniture" in plan:
+        items = plan["furniture"]
+        if not isinstance(items, list):
+            errors.append("furniture muss eine Liste sein")
+        elif len(items) > MAX_DOC_ITEMS:
+            errors.append("furniture ist zu groß")
+        elif not all(isinstance(i, dict) and isinstance(i.get("id"), str) for i in items):
+            errors.append("furniture: jeder Eintrag braucht ein Feld id")
     return errors
+
+
+def merge_plan_furniture(plan: dict[str, Any], previous: Any = None) -> dict[str, Any]:
+    """Möbel erhalten, wenn ein älterer Client speichert.
+
+    Apps bis 0.5 kennen ``furniture`` nicht und schicken das Feld nicht mit. Fehlt der
+    Schlüssel, übernimmt Haven die Möbel aus dem gespeicherten Stand ``previous``
+    (Speicherformat ``{"plan": ..., "updated_at": ...}``). Neuere Apps senden das Feld
+    immer, auch leer: Dann gilt es, ``[]`` löscht also alle Möbel.
+    """
+    if not isinstance(plan, dict) or "furniture" in plan:
+        return plan
+    old = read_plan_doc(previous)["plan"]
+    furniture = old.get("furniture") if isinstance(old, dict) else None
+    if isinstance(furniture, list) and furniture:
+        return {**plan, "furniture": furniture}
+    return plan
 
 
 def validate_widgets(widgets: Any) -> list[str]:
@@ -103,8 +129,10 @@ def resolve_updated_at(explicit: Any, doc: Any = None) -> Any:
     return None
 
 
-def build_plan_doc(plan: dict[str, Any], updated_at: Any = None) -> dict[str, Any]:
-    """Speicherformat ``haven.floorplan``. Das Dokument ``plan`` bleibt unverändert."""
+def build_plan_doc(plan: dict[str, Any], updated_at: Any = None, *, previous: Any = None) -> dict[str, Any]:
+    """Speicherformat ``haven.floorplan``. Das Dokument ``plan`` bleibt unverändert,
+    nur fehlende Möbel kommen aus ``previous`` dazu (siehe :func:`merge_plan_furniture`)."""
+    plan = merge_plan_furniture(plan, previous)
     return {"plan": plan, "updated_at": resolve_updated_at(updated_at, plan)}
 
 

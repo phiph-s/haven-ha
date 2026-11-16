@@ -71,6 +71,11 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     ):
         websocket_api.async_register_command(hass, command)
 
+    # Haven-Automationen (haven/automations/*), eigenes Modul
+    from .automations_ws import async_register_automation_commands  # noqa: PLC0415
+
+    async_register_automation_commands(hass)
+
 
 def _get_entry(hass: HomeAssistant) -> HavenConfigEntry | None:
     """Der (einzige) geladene Haven-Entry oder None."""

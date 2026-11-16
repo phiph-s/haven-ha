@@ -35,8 +35,12 @@ class HavenStorage:
         return read_plan_doc(await self._plan.async_load())
 
     async def async_set_plan(self, plan: dict[str, Any], updated_at: Any = None) -> Any:
-        """Speichert den Grundriss und gibt das gespeicherte ``updated_at`` zurück."""
-        doc = build_plan_doc(plan, updated_at)
+        """Speichert den Grundriss und gibt das gespeicherte ``updated_at`` zurück.
+
+        Ohne ``furniture`` im Plan (ältere App) bleiben die gespeicherten Möbel erhalten.
+        """
+        previous = None if "furniture" in plan else await self._plan.async_load()
+        doc = build_plan_doc(plan, updated_at, previous=previous)
         await self._plan.async_save(doc)
         return doc["updated_at"]
 
