@@ -33,13 +33,13 @@ Alle Befehle: `{"id": N, "type": "...", ...}`, Antwort im HA-üblichen Format `{
 ### `haven/info`
 ```json
 {"domain": "haven", "version": "0.3.0", "api_version": 1,
- "features": ["light_groups", "room_devices", "prefs", "data_events", "networkmap_cache"], "loaded": true,
+ "features": ["light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "networkmap_background"], "loaded": true,
  "z2m": {"base_topic": "zigbee2mqtt", "bridge_state": "online", "info_received": true,
          "version": "2.x", "coordinator_type": "...", "permit_join": false,
          "channel": 15, "pan_id": 6754,
          "device_count": 42, "group_count": 4, "devices_received": true, "groups_received": true}}
 ```
-(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0). `version` kommt aus `manifest.json`.
+(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1). `version` kommt aus `manifest.json`.
 
 ### `haven/rooms`
 Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gezählt werden nur Haupt-Entities (ohne `entity_category`, nicht deaktiviert, nicht versteckt).
@@ -112,7 +112,7 @@ Antwort sofort `result: null`, danach Events (`{"id": N, "type": "event", "event
 - `event`: `{"kind": "event", "event": {"type": "device_joined", "data": {...}}}` (Z2M-Bridge-Event roh)
 
 ## Schreibende Befehle
-Alle Befehle in diesem Abschnitt außer den Lesebefehlen (`state`, `floorplan/get`, `widgets/get`, `prefs/get`, `networkmap` ohne `refresh`) erfordern einen HA-Administrator. Befehle über `bridge/request/...` melden Erfolg erst, wenn Z2M auf `<base>/bridge/response/...` bestätigt hat (Abgleich über das Feld `transaction`, Präfix `haven-`). Timeout 10 s (Netzwerkkarte 90 s). Fehler: `success: false`, `error.code` und deutscher `error.message`. Codes: `timeout`, `z2m_error` (Z2M lehnt ab, Text von Z2M steht in der Meldung), `bridge_offline`, `mqtt_error`, `not_found`, `not_supported`, `name_taken`, `busy`, `invalid_format`, `unauthorized`.
+Alle Befehle in diesem Abschnitt außer den Lesebefehlen (`state`, `floorplan/get`, `widgets/get`, `prefs/get`, `networkmap` ohne `refresh`) erfordern einen HA-Administrator. Befehle über `bridge/request/...` melden Erfolg erst, wenn Z2M auf `<base>/bridge/response/...` bestätigt hat (Abgleich über das Feld `transaction`, Präfix `haven-`). Timeout 10 s (Netzwerkkarte 10 min). Fehler: `success: false`, `error.code` und deutscher `error.message`. Codes: `timeout`, `z2m_error` (Z2M lehnt ab, Text von Z2M steht in der Meldung), `bridge_offline`, `mqtt_error`, `not_found`, `not_supported`, `name_taken`, `busy`, `invalid_format`, `unauthorized`.
 
 ```json
 {"id": 9, "type": "result", "success": false,
@@ -175,13 +175,24 @@ Letzter bekannter Zustand je Gerät aus `<base>/<friendly_name>` (zusammengefüh
 ```
 
 ### `haven/zigbee/networkmap`
-Mit `refresh: true` (nur Admin): Topic `bridge/request/networkmap`, Payload `{type: "raw", routes: false}`, Timeout 90 s, nur eine Messung zur Zeit (sonst `busy`). Aus `data.value` werden `nodes` und `links` mit Zeitstempel (UTC, ISO 8601) gehalten und zusätzlich in `.storage/haven.networkmap` (Store-Version 1, verzögert nach jeder erfolgreichen Messung geschrieben, beim Start geladen). Der letzte Stand übersteht damit einen HA-Neustart (ab 0.3.0). Ohne `refresh` kommt der Cache oder `null`.
+Z2M braucht für `bridge/request/networkmap` (Payload `{type: "raw", routes: false}`) bei 40 Geräten rund 78 s und wartet bei nicht erreichbaren Geräten auf jedes einzelne. Deshalb gibt es drei Formen:
+
+- **`refresh: true, background: true`** (nur Admin, ab 0.5.1, Feature `networkmap_background`): Antwort sofort `{status: "started"|"running", started_at}`. Die Messung läuft als Task in der Integration und wartet bis zu 10 Minuten auf `bridge/response/networkmap` (Abgleich über `transaction`). Nur eine Messung zur Zeit: Ein zweiter Start meldet `running` mit dem `started_at` der laufenden Messung. Ist Z2M offline, kommt `bridge_offline`.
+- **`refresh: true`** ohne `background` (alte Apps): blockiert wie bis 0.5.0, jetzt mit 10 min Wartezeit; läuft schon eine Messung, `busy`.
+- **ohne `refresh`**: Cache plus Status: `{nodes, links, timestamp, running, started_at, last_error}`. Ohne Cache sind `nodes` und `links` leer und `timestamp` ist `null`. `started_at` ist nur bei `running` gesetzt, `last_error` bleibt bis zur nächsten erfolgreichen Messung stehen.
+
+Ende der Hintergrundmessung: HA-Ereignis `haven_networkmap_updated` mit `{ok: true, timestamp}` oder `{ok: false, error}`. Bei Erfolg sind Cache und `.storage/haven.networkmap` (Store-Version 1, verzögert geschrieben, beim Start geladen) schon aktuell. Bei Fehler (Timeout, Z2M lehnt ab, Z2M offline) bleibt der alte Cache erhalten. Der Text kommt auf Deutsch, den Z2M-Fehler gibt er weiter, nennt Z2M ein nicht antwortendes Gerät in Anführungszeichen, steht dort „Gerät X nicht erreichbar“. Liefert Z2M `failed`-Einträge bei einzelnen Knoten, ist das ein Teilergebnis und gilt als Erfolg; die `failed`-Felder bleiben in `nodes` erhalten. Aus `data.value` werden `nodes` und `links` mit Zeitstempel (UTC, ISO 8601) gehalten.
 ```json
-{"type": "haven/zigbee/networkmap", "refresh": true}
-→ {"nodes": [{"ieeeAddr": "0x...", "friendlyName": "...", "type": "Router"}],
+{"type": "haven/zigbee/networkmap", "refresh": true, "background": true}
+→ {"status": "started", "started_at": "2026-11-16T12:00:00+00:00"}
+
+{"type": "haven/zigbee/networkmap"}
+→ {"nodes": [{"ieeeAddr": "0x...", "friendlyName": "...", "type": "Router", "failed": []}],
    "links": [{"source": {"ieeeAddr": "0x..."}, "target": {"ieeeAddr": "0x..."}, "lqi": 120}],
-   "timestamp": "2026-11-15T12:00:00+00:00"}
+   "timestamp": "2026-11-15T12:00:00+00:00",
+   "running": false, "started_at": null, "last_error": null}
 ```
+Ungeprüft auf echtem HA: der Ablauf mit echtem Z2M (Version 0.5.1 ist nur mit den Tests geprüft).
 
 ### `haven/floorplan/get` und `haven/floorplan/set`
 Speicher: `.storage/haven.floorplan` (Store-Version 1, Inhalt `{"plan": {...}, "updated_at": ...}`). `plan` ist das Dokument von `HavenFloorPlan.toJson` der App. Geprüft wird nur: Objekt, `version` (Zahl), `rooms` (Liste, jeder Eintrag mit `id`), `placements` (Liste, jeder Eintrag mit `entityId`), optional `furniture` (Liste, jeder Eintrag mit `id`). Geometrie prüft die App. Unbekannte Felder im `plan` bleiben unverändert erhalten.
@@ -306,7 +317,7 @@ Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, melde
 ```
 cd integration && python3 -m pytest -q
 ```
-Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration), `motion` (Bedingungen, Besitz-Automat, Befehle, Validierung, Migration). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `motion_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
+Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich, Zustand und Ablauf der Hintergrund-Netzmessung), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration), `motion` (Bedingungen, Besitz-Automat, Befehle, Validierung, Migration). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `motion_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
 
 Registry-Zugriffe laufen ohne `dev_reg.devices.values()` / `ent_reg.entities.values()` (ab HA 2027.9 veraltet): `haven/rooms` über `async_list_areas`, `dr/er.async_entries_for_area`, `er.async_entries_for_device`, Geräte ohne Bereich über `dr.async_entries_for_config_entry` aller Config-Entries, Lichter ohne Bereich über `hass.states.async_all("light")`. Die HA-Zuordnung der Zigbee-Geräte (`area_id`, `ha_entities`) liest nur Geräte der MQTT-Config-Entries. Geräte ganz ohne Config-Entry fehlen in `unassigned`.
 

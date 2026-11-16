@@ -8,10 +8,13 @@ Die ``transaction`` aus der Anfrage wird zurückgegeben und dient dem Abgleich.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+import re
 from typing import Any
 
 DEFAULT_TIMEOUT = 10.0
-NETWORKMAP_TIMEOUT = 90.0
+# Z2M wartet bei der Netzmessung auf jedes Gerät: 78 s im Normalfall, mit unerreichbaren Geräten deutlich länger
+NETWORKMAP_TIMEOUT = 600.0
 MAX_PERMIT_JOIN = 254  # Z2M akzeptiert 0..254 Sekunden
 
 
@@ -166,3 +169,70 @@ class TransactionTracker:
             self.discard(tid)
             raise
         return parse_response(response)
+
+
+# --- Netzmessung im Hintergrund ------------------------------------------------------
+
+
+def failed_nodes(nodes: Any) -> list[str]:
+    """Namen der Knoten, bei denen Z2M ``failed``-Einträge meldet (Teilergebnis)."""
+    out: list[str] = []
+    if not isinstance(nodes, list):
+        return out
+    for node in nodes:
+        if isinstance(node, dict) and node.get("failed"):
+            out.append(str(node.get("friendlyName") or node.get("ieeeAddr") or "?"))
+    return out
+
+
+_UNREACHABLE = re.compile(r"(timeout|timed out|not reachable|unreachable|no response|did not respond)", re.I)
+_QUOTED = re.compile(r"'([^']+)'")
+
+
+def describe_networkmap_error(text: str) -> str:
+    """Z2M-Fehlertext verständlich: nennt das Gerät, wenn Z2M eins nennt und es nicht antwortet."""
+    text = (text or "").strip() or "unbekannter Fehler"
+    quoted = _QUOTED.search(text)
+    if quoted and _UNREACHABLE.search(text):
+        return f"Gerät {quoted.group(1)} nicht erreichbar (Zigbee2MQTT: {text})"
+    return f"Zigbee2MQTT meldet: {text}"
+
+
+def build_networkmap_cache(value: Any, now: datetime | None = None) -> dict[str, Any] | None:
+    """Cache-Eintrag aus ``data.value`` der Z2M-Response, ``None`` ohne Netzkarte."""
+    if not isinstance(value, dict):
+        return None
+    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    return {"nodes": value.get("nodes", []), "links": value.get("links", []), "timestamp": stamp}
+
+
+class NetworkmapJob:
+    """Zustand der (einen) Netzmessung: läuft, Beginn, letzter Fehler. Reines Python."""
+
+    def __init__(self) -> None:
+        self.running = False
+        self.started_at: str | None = None
+        self.last_error: str | None = None
+
+    def start(self, now: datetime | None = None) -> str:
+        """``"started"`` oder ``"running"`` (dann bleibt ``started_at`` des laufenden Laufs)."""
+        if self.running:
+            return "running"
+        self.running = True
+        self.started_at = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+        return "started"
+
+    def finish_ok(self) -> None:
+        self.running = False
+        self.last_error = None
+
+    def finish_error(self, error: str) -> None:
+        self.running = False
+        self.last_error = error
+
+    def info(self) -> dict[str, Any]:
+        return {
+            "running": self.running,
+            "started_at": self.started_at if self.running else None,
+            "last_error": self.last_error,
+        }

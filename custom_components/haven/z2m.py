@@ -20,9 +20,12 @@ from typing import TYPE_CHECKING, Any
 from .commands import (
     DEFAULT_TIMEOUT,
     NETWORKMAP_TIMEOUT,
+    NetworkmapJob,
     TransactionTracker,
     Z2MError,
     build_networkmap,
+    build_networkmap_cache,
+    describe_networkmap_error,
     request_topic,
 )
 from .const import MAX_EVENTS
@@ -66,7 +69,10 @@ class Z2MBridge:
         self.tracker = TransactionTracker()
         self.state_cache = StateCache(self.base_topic)
         self.networkmap: dict[str, Any] | None = None  # {nodes, links, timestamp}
-        self._networkmap_busy = False
+        self.networkmap_job = NetworkmapJob()
+        self._networkmap_task: asyncio.Task[None] | None = None
+        # Wird nach jeder Messung (Erfolg oder Fehler) mit dem Ereignis-Payload aufgerufen
+        self.on_networkmap_done: Callable[[dict[str, Any]], None] | None = None
         # Wird nach jeder erfolgreichen Messung mit dem neuen Cache aufgerufen (Persistenz)
         self.on_networkmap: Callable[[dict[str, Any]], None] | None = None
 
@@ -135,6 +141,7 @@ class Z2MBridge:
             unsub()
         self._unsubs.clear()
         self._slash_unsubs.clear()
+        self.stop_networkmap()
         self.tracker.cancel_all()
         self._listeners.clear()
 
@@ -259,32 +266,82 @@ class Z2MBridge:
             raise Z2MError("mqtt_error", f"MQTT-Senden fehlgeschlagen: {err}") from err
         return await self.tracker.wait(tid, fut, timeout, endpoint)
 
-    async def async_networkmap(self, refresh: bool) -> dict[str, Any] | None:
-        """Cache oder (bei ``refresh``) neue Messung. Nur eine Messung zur Zeit."""
-        if not refresh:
-            return self.networkmap
-        if self._networkmap_busy:
-            raise Z2MError("busy", "Die Netzwerkkarte wird gerade schon gemessen")
-        self._networkmap_busy = True
+    async def _async_measure_networkmap(self) -> dict[str, Any]:
+        """Eine Messung (Job muss gestartet sein). Wirft :class:`Z2MError`."""
         try:
             data = await self.async_request("networkmap", build_networkmap(), NETWORKMAP_TIMEOUT)
-        finally:
-            self._networkmap_busy = False
-        value = data.get("value")
-        if not isinstance(value, dict):
-            raise Z2MError("z2m_error", "Zigbee2MQTT hat keine Netzwerkkarte geliefert")
-        self.networkmap = {
-            "nodes": value.get("nodes", []),
-            "links": value.get("links", []),
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
+            cache = build_networkmap_cache(data.get("value"))
+            if cache is None:
+                raise Z2MError("z2m_error", "Zigbee2MQTT hat keine Netzwerkkarte geliefert")
+        except Z2MError as err:
+            if err.code == "z2m_error":
+                reason = err.message.split(": ", 1)[-1]
+                err = Z2MError("z2m_error", describe_networkmap_error(reason))
+            self.networkmap_job.finish_error(err.message)
+            raise err
+        except BaseException:
+            self.networkmap_job.finish_error("Messung abgebrochen")
+            raise
+        # Teilergebnis (``failed`` bei einzelnen Knoten) zählt als Erfolg
+        self.networkmap = cache
+        self.networkmap_job.finish_ok()
         if self.on_networkmap is not None:
-            self.on_networkmap(self.networkmap)
-        return self.networkmap
+            self.on_networkmap(cache)
+        return cache
+
+    def _fire_networkmap_done(self, payload: dict[str, Any]) -> None:
+        if self.on_networkmap_done is not None:
+            try:
+                self.on_networkmap_done(payload)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Haven-Ereignis der Netzmessung fehlgeschlagen")
+
+    async def _async_networkmap_task(self) -> None:
+        try:
+            cache = await self._async_measure_networkmap()
+        except Z2MError as err:
+            self._fire_networkmap_done({"ok": False, "error": err.message})
+        except asyncio.CancelledError:
+            self._fire_networkmap_done({"ok": False, "error": "Messung abgebrochen"})
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Netzmessung fehlgeschlagen")
+            self.networkmap_job.finish_error(f"Interner Fehler: {err}")
+            self._fire_networkmap_done({"ok": False, "error": self.networkmap_job.last_error})
+        else:
+            self._fire_networkmap_done({"ok": True, "timestamp": cache["timestamp"]})
+
+    def start_networkmap(self) -> dict[str, Any]:
+        """Startet die Messung als Task und kehrt sofort zurück: ``{status, started_at}``."""
+        job = self.networkmap_job
+        if job.running:
+            return {"status": "running", "started_at": job.started_at}
+        self._check_online()
+        status = job.start()
+        self._networkmap_task = asyncio.get_running_loop().create_task(self._async_networkmap_task())
+        return {"status": status, "started_at": job.started_at}
+
+    def networkmap_view(self) -> dict[str, Any]:
+        """Cache (oder leere Karte) plus ``running``, ``started_at``, ``last_error``."""
+        base = self.networkmap or {"nodes": [], "links": [], "timestamp": None}
+        return {**base, **self.networkmap_job.info()}
+
+    async def async_networkmap(self, refresh: bool) -> dict[str, Any] | None:
+        """Cache oder (bei ``refresh``) blockierende Messung. Nur eine Messung zur Zeit."""
+        if not refresh:
+            return self.networkmap
+        if self.networkmap_job.running:
+            raise Z2MError("busy", "Die Netzwerkkarte wird gerade schon gemessen")
+        self.networkmap_job.start()
+        return await self._async_measure_networkmap()
+
+    def stop_networkmap(self) -> None:
+        if self._networkmap_task is not None and not self._networkmap_task.done():
+            self._networkmap_task.cancel()
 
     @property
     def networkmap_busy(self) -> bool:
-        return self._networkmap_busy
+        return self.networkmap_job.running
 
     def device_ref(self, ieee: str) -> dict[str, Any]:
         """Rohdaten eines Geräts oder :class:`Z2MError` ``not_found``."""

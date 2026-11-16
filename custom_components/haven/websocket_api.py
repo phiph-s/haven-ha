@@ -558,20 +558,34 @@ async def ws_zigbee_state(
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): "haven/zigbee/networkmap", vol.Optional("refresh", default=False): bool}
+    {
+        vol.Required("type"): "haven/zigbee/networkmap",
+        vol.Optional("refresh", default=False): bool,
+        vol.Optional("background", default=False): bool,
+    }
 )
 @websocket_api.async_response
 async def ws_zigbee_networkmap(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Cache lesen darf jeder Benutzer, eine neue Messung nur ein Admin."""
+    """Cache lesen darf jeder Benutzer, eine neue Messung nur ein Admin.
+
+    ``refresh`` + ``background``: Antwort sofort ``{status, started_at}``, Ergebnis per Ereignis
+    ``haven_networkmap_updated``. ``refresh`` allein blockiert wie bis 0.5.0 (bis 10 min).
+    Ohne ``refresh``: Cache plus ``running``, ``started_at``, ``last_error``.
+    """
     if (bridge := _bridge_or_error(hass, connection, msg["id"])) is None:
         return
     if msg["refresh"] and not connection.user.is_admin:
         connection.send_error(msg["id"], websocket_api.ERR_UNAUTHORIZED, "Nur Administratoren dürfen messen")
         return
     try:
-        result = await bridge.async_networkmap(msg["refresh"])
+        if msg["refresh"] and msg["background"]:
+            result: Any = bridge.start_networkmap()
+        elif msg["refresh"]:
+            result = await bridge.async_networkmap(True)
+        else:
+            result = bridge.networkmap_view()
     except Z2MError as err:
         _fail(connection, msg["id"], err)
         return
