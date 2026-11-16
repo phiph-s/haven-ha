@@ -13,7 +13,17 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import async_get_integration
 
-from .appdata import normalize_prefs, require_valid, validate_floorplan, validate_prefs, validate_widgets
+from .appdata import (
+    build_event_data,
+    normalize_prefs,
+    require_valid,
+    resolve_updated_at,
+    validate_floorplan,
+    validate_layout,
+    validate_prefs,
+    validate_updated_at,
+    validate_widgets,
+)
 from .commands import (
     Z2MError,
     build_interview,
@@ -23,7 +33,7 @@ from .commands import (
     build_set,
     supports_identify,
 )
-from .const import DOMAIN, FEATURES, STATE_MAX_PER_SECOND
+from .const import DOMAIN, EVENT_DATA_UPDATED, FEATURES, STATE_MAX_PER_SECOND
 from .groupsync import plan_group_sync
 from .rooms import AreaData, DeviceData, EntityData, assemble_rooms
 from .storage import get_storage
@@ -571,21 +581,29 @@ async def ws_zigbee_networkmap(
 async def ws_floorplan_get(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    connection.send_result(msg["id"], {"plan": await get_storage(hass).async_get_plan()})
+    connection.send_result(msg["id"], await get_storage(hass).async_get_plan_doc())
 
 
 @websocket_api.require_admin
-@websocket_api.websocket_command({vol.Required("type"): "haven/floorplan/set", vol.Required("plan"): dict})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/floorplan/set",
+        vol.Required("plan"): dict,
+        vol.Optional("updated_at"): vol.Any(str, int, float, None),
+    }
+)
 @websocket_api.async_response
 async def ws_floorplan_set(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     try:
         require_valid(validate_floorplan(msg["plan"]), "Der Grundriss")
+        require_valid(validate_updated_at(msg.get("updated_at")), "updated_at")
     except Z2MError as err:
         _fail(connection, msg["id"], err)
         return
-    await get_storage(hass).async_set_plan(msg["plan"])
+    updated_at = await get_storage(hass).async_set_plan(msg["plan"], msg.get("updated_at"))
+    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("floorplan", updated_at))
     connection.send_result(msg["id"], {"ok": True})
 
 
@@ -594,21 +612,34 @@ async def ws_floorplan_set(
 async def ws_widgets_get(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    connection.send_result(msg["id"], {"widgets": await get_storage(hass).async_get_widgets()})
+    connection.send_result(msg["id"], await get_storage(hass).async_get_widgets_doc())
 
 
 @websocket_api.require_admin
-@websocket_api.websocket_command({vol.Required("type"): "haven/widgets/set", vol.Required("widgets"): list})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/widgets/set",
+        vol.Required("widgets"): list,
+        vol.Optional("layout"): vol.Any(dict, None),
+        vol.Optional("updated_at"): vol.Any(str, int, float, None),
+    }
+)
 @websocket_api.async_response
 async def ws_widgets_set(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     try:
         require_valid(validate_widgets(msg["widgets"]), "Die Widget-Konfiguration")
+        require_valid(validate_layout(msg.get("layout")), "layout")
+        require_valid(validate_updated_at(msg.get("updated_at")), "updated_at")
     except Z2MError as err:
         _fail(connection, msg["id"], err)
         return
-    await get_storage(hass).async_set_widgets(msg["widgets"])
+    updated_at = msg.get("updated_at")
+    await get_storage(hass).async_set_widgets(
+        msg["widgets"], msg.get("layout"), updated_at, layout_given="layout" in msg
+    )
+    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("widgets", updated_at))
     connection.send_result(msg["id"], {"ok": True})
 
 
@@ -633,4 +664,5 @@ async def ws_prefs_set(
         return
     prefs = normalize_prefs(msg["prefs"])
     await get_storage(hass).async_set_prefs(prefs)
+    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("prefs", resolve_updated_at(None, prefs)))
     connection.send_result(msg["id"], {"ok": True, "prefs": prefs})

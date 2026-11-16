@@ -32,14 +32,14 @@ Alle Befehle: `{"id": N, "type": "...", ...}`, Antwort im HA-üblichen Format `{
 
 ### `haven/info`
 ```json
-{"domain": "haven", "version": "0.2.0", "api_version": 1,
- "features": ["light_groups", "room_devices", "prefs"], "loaded": true,
+{"domain": "haven", "version": "0.3.0", "api_version": 1,
+ "features": ["light_groups", "room_devices", "prefs", "data_events", "networkmap_cache"], "loaded": true,
  "z2m": {"base_topic": "zigbee2mqtt", "bridge_state": "online", "info_received": true,
          "version": "2.x", "coordinator_type": "...", "permit_join": false,
          "channel": 15, "pan_id": 6754,
          "device_count": 42, "group_count": 4, "devices_received": true, "groups_received": true}}
 ```
-(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`).
+(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0). `version` kommt aus `manifest.json`.
 
 ### `haven/rooms`
 Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gezählt werden nur Haupt-Entities (ohne `entity_category`, nicht deaktiviert, nicht versteckt).
@@ -175,7 +175,7 @@ Letzter bekannter Zustand je Gerät aus `<base>/<friendly_name>` (zusammengefüh
 ```
 
 ### `haven/zigbee/networkmap`
-Mit `refresh: true` (nur Admin): Topic `bridge/request/networkmap`, Payload `{type: "raw", routes: false}`, Timeout 90 s, nur eine Messung zur Zeit (sonst `busy`). Aus `data.value` werden `nodes` und `links` mit Zeitstempel (UTC, ISO 8601) im Speicher gehalten (nicht über einen HA-Neustart). Ohne `refresh` kommt der Cache oder `null`.
+Mit `refresh: true` (nur Admin): Topic `bridge/request/networkmap`, Payload `{type: "raw", routes: false}`, Timeout 90 s, nur eine Messung zur Zeit (sonst `busy`). Aus `data.value` werden `nodes` und `links` mit Zeitstempel (UTC, ISO 8601) gehalten und zusätzlich in `.storage/haven.networkmap` (Store-Version 1, verzögert nach jeder erfolgreichen Messung geschrieben, beim Start geladen). Der letzte Stand übersteht damit einen HA-Neustart (ab 0.3.0). Ohne `refresh` kommt der Cache oder `null`.
 ```json
 {"type": "haven/zigbee/networkmap", "refresh": true}
 → {"nodes": [{"ieeeAddr": "0x...", "friendlyName": "...", "type": "Router"}],
@@ -184,18 +184,23 @@ Mit `refresh: true` (nur Admin): Topic `bridge/request/networkmap`, Payload `{ty
 ```
 
 ### `haven/floorplan/get` und `haven/floorplan/set`
-Speicher: `.storage/haven.floorplan` (Store-Version 1, Inhalt `{"plan": {...}}`). `plan` ist das Dokument von `HavenFloorPlan.toJson` der App. Geprüft wird nur: Objekt, `version` (Zahl), `rooms` (Liste, jeder Eintrag mit `id`), `placements` (Liste, jeder Eintrag mit `entityId`). Geometrie prüft die App.
+Speicher: `.storage/haven.floorplan` (Store-Version 1, Inhalt `{"plan": {...}, "updated_at": ...}`). `plan` ist das Dokument von `HavenFloorPlan.toJson` der App. Geprüft wird nur: Objekt, `version` (Zahl), `rooms` (Liste, jeder Eintrag mit `id`), `placements` (Liste, jeder Eintrag mit `entityId`). Geometrie prüft die App. Unbekannte Felder im `plan` bleiben unverändert erhalten.
+
+Optional (ab 0.3.0) `updated_at` neben `plan`: Text (ISO 8601) oder Zahl (Millisekunden), wird nur durchgereicht und nicht ausgewertet. Fehlt es, nimmt Haven ein vorhandenes Feld `updatedAt` aus dem `plan`, sonst `null`. `get` liefert immer `plan` und `updated_at`. Alte Clients ohne `updated_at` funktionieren unverändert, alte Speicherstände geben `updated_at: null`.
 ```json
-{"type": "haven/floorplan/get"} → {"plan": {"version": 1, "grid": {"cols": 20, "rows": 26, "cellMeters": 0.5}, "rooms": [], "placements": []}}
-{"type": "haven/floorplan/get"} → {"plan": null}
-{"type": "haven/floorplan/set", "plan": {"version": 1, "rooms": [], "placements": []}} → {"ok": true}
+{"type": "haven/floorplan/get"} → {"plan": {"version": 1, "grid": {"cols": 20, "rows": 26, "cellMeters": 0.5}, "rooms": [], "placements": []}, "updated_at": "2026-11-15T12:00:00Z"}
+{"type": "haven/floorplan/get"} → {"plan": null, "updated_at": null}
+{"type": "haven/floorplan/set", "plan": {"version": 1, "rooms": [], "placements": []}, "updated_at": "2026-11-15T12:00:00Z"} → {"ok": true}
 ```
 
 ### `haven/widgets/get` und `haven/widgets/set`
-Speicher: `.storage/haven.widgets` (`{"widgets": [...]}`). Format je Eintrag wie `HavenWidgetConfig.toJson` der App: `id`, `type` (`power`, `entityToggle`, `lowBattery`, `weather`), `entities`, `options`. Geprüft: Liste, `id` und `type` als Text, IDs eindeutig. Noch nie gespeichert: `null`.
+Speicher: `.storage/haven.widgets` (`{"widgets": [...], "layout": {...}|null, "updated_at": ...|null}`). Format je Eintrag wie `HavenWidgetConfig.toJson` der App: `id`, `type` (`power`, `entityToggle`, `lowBattery`, `weather`), `entities`, `options`. Geprüft: Liste, `id` und `type` als Text, IDs eindeutig. Unbekannte Felder je Widget bleiben erhalten. Noch nie gespeichert: `widgets: null`.
+
+Optional (ab 0.3.0): `layout` (beliebiges Objekt oder `null`, Haven prüft nur den Typ) und `updated_at` (Text oder Zahl, nur durchgereicht). Fehlt `layout` im `set`, bleibt das bisherige Layout erhalten (alte Clients löschen es nicht), `layout: null` löscht es. `updated_at` wird nicht übernommen, wenn es fehlt (dann `null`). `get` liefert immer alle drei Felder.
 ```json
-{"type": "haven/widgets/set", "widgets": [{"id": "power", "type": "power", "entities": [], "options": {}}]} → {"ok": true}
-{"type": "haven/widgets/get"} → {"widgets": [{"id": "power", "type": "power", "entities": [], "options": {}}]}
+{"type": "haven/widgets/set", "widgets": [{"id": "power", "type": "power", "entities": [], "options": {}}], "layout": {"columns": 2}, "updated_at": 1763208000000} → {"ok": true}
+{"type": "haven/widgets/get"} → {"widgets": [{"id": "power", "type": "power", "entities": [], "options": {}}], "layout": {"columns": 2}, "updated_at": 1763208000000}
+{"type": "haven/widgets/get"} → {"widgets": null, "layout": null, "updated_at": null}
 ```
 
 ### `haven/prefs/get` und `haven/prefs/set`
@@ -206,11 +211,21 @@ Speicher: `.storage/haven.prefs` (`{"prefs": {...}}`). Ein Dokument für App-Ein
 → {"ok": true, "prefs": {"excluded_lights": ["light.salon"]}}
 ```
 
+## Event `haven_data_updated` (ab 0.3.0)
+Nach jedem erfolgreichen `haven/floorplan/set`, `haven/widgets/set` und `haven/prefs/set` feuert Haven auf dem HA-Event-Bus `haven_data_updated`, damit andere Geräte neu laden können.
+```json
+{"event_type": "haven_data_updated", "data": {"kind": "floorplan", "updated_at": "2026-11-15T12:00:00Z"}}
+```
+- `kind`: `floorplan`, `widgets` oder `prefs`.
+- `updated_at`: nur wenn bekannt (aus dem Befehl, bei Grundriss und Prefs sonst aus dem Feld `updatedAt` des Dokuments), unverändert als Text oder Zahl. Sonst fehlt der Schlüssel.
+- Die App abonniert per `subscribe_events` mit `event_type: "haven_data_updated"`.
+- Einschränkung: HA erlaubt Nicht-Administratoren `subscribe_events` nur für Event-Typen aus der `SUBSCRIBE_ALLOWLIST` von HA. `haven_data_updated` steht nicht darin, das Abo funktioniert also nur mit einem Administrator-Konto (die App nutzt dessen Long-Lived-Token). Das stammt aus dem Wissen über den HA-Quellcode, nicht aus einem Test.
+
 ## Entwicklung und Tests
 ```
 cd integration && python3 -m pytest -q
 ```
-Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 noch nicht.
+Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
 
 Registry-Zugriffe laufen ohne `dev_reg.devices.values()` / `ent_reg.entities.values()` (ab HA 2027.9 veraltet): `haven/rooms` über `async_list_areas`, `dr/er.async_entries_for_area`, `er.async_entries_for_device`, Geräte ohne Bereich über `dr.async_entries_for_config_entry` aller Config-Entries, Lichter ohne Bereich über `hass.states.async_all("light")`. Die HA-Zuordnung der Zigbee-Geräte (`area_id`, `ha_entities`) liest nur Geräte der MQTT-Config-Entries. Geräte ganz ohne Config-Entry fehlen in `unassigned`.
 
@@ -218,7 +233,8 @@ Neue Z2M-Property: Eintrag in `LABELS` (`exposes.py`) ergänzen. Ohne Eintrag l�
 
 ## Offen
 - Gruppenerkennung über `group_entities` stammt aus den Zuständen von HA mit Z2M 2.14.3. Mit anderen HA-Versionen ungeprüft, dafür gibt es die Namensregel als Rückfall.
-- Version 0.2.0 ist nur mit den Tests (ohne laufendes HA) geprüft, die lesenden Befehle liefen bereits in 0.1.0 auf echtem HA.
+- Version 0.3.0 ist nur mit den Tests (ohne laufendes HA) geprüft, die lesenden Befehle liefen bereits in 0.1.0 auf echtem HA. Ungeprüft auf echtem HA: Event `haven_data_updated`, Laden und verzögertes Schreiben von `haven.networkmap`, neue optionale Felder.
+- `subscribe_events` für `haven_data_updated` mit Nicht-Administratoren ist nicht erlaubt (siehe Event-Abschnitt), ungetestet.
 
 ## Lizenz
 MIT, siehe `LICENSE`.

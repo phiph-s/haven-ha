@@ -70,3 +70,65 @@ def test_prefs():
     extra = {"excluded_lights": ["light.a"], "theme": {"dark": True}}
     assert appdata.validate_prefs(extra) == []
     assert appdata.normalize_prefs(extra) == extra
+
+
+# --- 0.3.0: Events, updated_at/layout, Networkmap-Cache ---------------------------------
+
+
+def test_event_data():
+    assert appdata.build_event_data("prefs") == {"kind": "prefs"}
+    assert appdata.build_event_data("widgets", "2026-11-15T12:00:00Z") == {
+        "kind": "widgets",
+        "updated_at": "2026-11-15T12:00:00Z",
+    }
+    assert appdata.build_event_data("floorplan", 1763208000000)["updated_at"] == 1763208000000
+
+
+def test_updated_at_validation_and_resolution():
+    assert appdata.validate_updated_at(None) == []
+    assert appdata.validate_updated_at("2026-11-15T12:00:00Z") == []
+    assert appdata.validate_updated_at(1763208000000) == []
+    assert appdata.validate_updated_at(True) != []
+    assert appdata.validate_updated_at({}) != []
+    assert appdata.validate_layout(None) == [] and appdata.validate_layout({"a": 1}) == []
+    assert appdata.validate_layout([]) != []
+    assert appdata.resolve_updated_at("x", {"updatedAt": "y"}) == "x"
+    assert appdata.resolve_updated_at(None, {"updatedAt": "y"}) == "y"
+    assert appdata.resolve_updated_at(None, {"updatedAt": True}) is None
+    assert appdata.resolve_updated_at(None, {}) is None
+
+
+def test_plan_doc_keeps_unknown_fields():
+    plan = {**PLAN, "updatedAt": "2026-11-15T12:00:00Z", "neu": {"x": 1}}
+    stored = appdata.build_plan_doc(plan)
+    assert stored["plan"] == plan and stored["updated_at"] == "2026-11-15T12:00:00Z"
+    assert appdata.read_plan_doc(stored) == {"plan": plan, "updated_at": "2026-11-15T12:00:00Z"}
+    assert appdata.build_plan_doc(plan, 5)["updated_at"] == 5
+    # Alter Speicherstand ohne updated_at
+    assert appdata.read_plan_doc({"plan": PLAN}) == {"plan": PLAN, "updated_at": None}
+    assert appdata.read_plan_doc(None) == {"plan": None, "updated_at": None}
+
+
+def test_widgets_doc():
+    widgets = [{"id": "power", "type": "power", "entities": [], "options": {}, "extra": 1}]
+    assert appdata.read_widgets_doc(None) == {"widgets": None, "layout": None, "updated_at": None}
+    # Alter Speicherstand (0.2.0)
+    assert appdata.read_widgets_doc({"widgets": widgets}) == {"widgets": widgets, "layout": None, "updated_at": None}
+    doc = appdata.build_widgets_doc(widgets, {"cols": 2}, "t", layout_given=True)
+    assert appdata.read_widgets_doc(doc) == {"widgets": widgets, "layout": {"cols": 2}, "updated_at": "t"}
+    # Alter Client sendet kein layout: bisheriges bleibt
+    kept = appdata.build_widgets_doc(widgets, None, None, previous=doc)
+    assert kept["layout"] == {"cols": 2} and kept["updated_at"] is None
+    # layout: null löscht
+    assert appdata.build_widgets_doc(widgets, None, None, previous=doc, layout_given=True)["layout"] is None
+
+
+def test_networkmap_cache_roundtrip():
+    nm = {"nodes": [{"ieeeAddr": "0x1"}], "links": [], "timestamp": "2026-11-15T12:00:00+00:00", "extra": 1}
+    stored = appdata.serialize_networkmap_cache(nm)
+    assert stored == {"networkmap": {"nodes": nm["nodes"], "links": [], "timestamp": nm["timestamp"]}}
+    assert appdata.deserialize_networkmap_cache(stored) == stored["networkmap"]
+    assert appdata.deserialize_networkmap_cache(None) is None
+    assert appdata.deserialize_networkmap_cache({"networkmap": {"nodes": "x", "links": [], "timestamp": "t"}}) is None
+    assert appdata.deserialize_networkmap_cache({"networkmap": {"nodes": [], "links": []}}) is None
+    assert appdata.serialize_networkmap_cache(None) == {"networkmap": None}

@@ -67,6 +67,8 @@ class Z2MBridge:
         self.state_cache = StateCache(self.base_topic)
         self.networkmap: dict[str, Any] | None = None  # {nodes, links, timestamp}
         self._networkmap_busy = False
+        # Wird nach jeder erfolgreichen Messung mit dem neuen Cache aufgerufen (Persistenz)
+        self.on_networkmap: Callable[[dict[str, Any]], None] | None = None
 
     # --- Lebenszyklus --------------------------------------------------------
 
@@ -276,6 +278,8 @@ class Z2MBridge:
             "links": value.get("links", []),
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
+        if self.on_networkmap is not None:
+            self.on_networkmap(self.networkmap)
         return self.networkmap
 
     @property

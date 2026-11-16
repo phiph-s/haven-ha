@@ -1,4 +1,4 @@
-"""Persistenz der App-Daten in ``.storage`` (``haven.floorplan``, ``haven.widgets``, ``haven.prefs``)."""
+"""Persistenz der App-Daten in ``.storage`` (``haven.floorplan``, ``haven.widgets``, ``haven.prefs``, ``haven.networkmap``)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,15 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .appdata import normalize_prefs
+from .appdata import (
+    build_plan_doc,
+    build_widgets_doc,
+    deserialize_networkmap_cache,
+    normalize_prefs,
+    read_plan_doc,
+    read_widgets_doc,
+    serialize_networkmap_cache,
+)
 from .const import DOMAIN, STORAGE_VERSION
 
 _KEY = f"{DOMAIN}_storage"
@@ -20,20 +28,41 @@ class HavenStorage:
         self._plan = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.floorplan")
         self._widgets = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.widgets")
         self._prefs = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.prefs")
+        self._networkmap = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.networkmap")
 
-    async def async_get_plan(self) -> dict[str, Any] | None:
-        data = await self._plan.async_load()
-        return data.get("plan") if data else None
+    async def async_get_plan_doc(self) -> dict[str, Any]:
+        """``{"plan": {...}|None, "updated_at": ...|None}``."""
+        return read_plan_doc(await self._plan.async_load())
 
-    async def async_set_plan(self, plan: dict[str, Any]) -> None:
-        await self._plan.async_save({"plan": plan})
+    async def async_set_plan(self, plan: dict[str, Any], updated_at: Any = None) -> Any:
+        """Speichert den Grundriss und gibt das gespeicherte ``updated_at`` zurück."""
+        doc = build_plan_doc(plan, updated_at)
+        await self._plan.async_save(doc)
+        return doc["updated_at"]
 
-    async def async_get_widgets(self) -> list[dict[str, Any]] | None:
-        data = await self._widgets.async_load()
-        return data.get("widgets") if data else None
+    async def async_get_widgets_doc(self) -> dict[str, Any]:
+        """``{"widgets": [...]|None, "layout": {...}|None, "updated_at": ...|None}``."""
+        return read_widgets_doc(await self._widgets.async_load())
 
-    async def async_set_widgets(self, widgets: list[dict[str, Any]]) -> None:
-        await self._widgets.async_save({"widgets": widgets})
+    async def async_set_widgets(
+        self,
+        widgets: list[dict[str, Any]],
+        layout: Any = None,
+        updated_at: Any = None,
+        *,
+        layout_given: bool = False,
+    ) -> None:
+        previous = await self._widgets.async_load() if not layout_given else None
+        await self._widgets.async_save(
+            build_widgets_doc(widgets, layout, updated_at, previous=previous, layout_given=layout_given)
+        )
+
+    async def async_load_networkmap(self) -> dict[str, Any] | None:
+        return deserialize_networkmap_cache(await self._networkmap.async_load())
+
+    def schedule_save_networkmap(self, networkmap: dict[str, Any]) -> None:
+        """Schreibt den Cache verzögert (Store bündelt mehrere Aufrufe)."""
+        self._networkmap.async_delay_save(lambda: serialize_networkmap_cache(networkmap), 1)
 
     async def async_get_prefs(self) -> dict[str, Any]:
         """Nie gespeichert: ``{"excluded_lights": []}``."""

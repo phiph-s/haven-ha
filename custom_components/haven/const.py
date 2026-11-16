@@ -5,7 +5,10 @@ from __future__ import annotations
 DOMAIN = "haven"
 
 # Fähigkeiten für haven/info (die App prüft darauf statt auf die Version)
-FEATURES = ("light_groups", "room_devices", "prefs")
+FEATURES = ("light_groups", "room_devices", "prefs", "data_events", "networkmap_cache")
+
+# HA-Event nach erfolgreichem floorplan/set, widgets/set und prefs/set
+EVENT_DATA_UPDATED = "haven_data_updated"
 
 CONF_BASE_TOPIC = "base_topic"
 DEFAULT_BASE_TOPIC = "zigbee2mqtt"

@@ -12,6 +12,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC, DOMAIN
+from .storage import get_storage
 from .websocket_api import async_register_websocket_commands
 from .z2m import Z2MBridge
 
@@ -42,6 +43,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HavenConfigEntry) -> boo
         CONF_BASE_TOPIC, entry.data.get(CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC)
     )
     bridge = Z2MBridge(hass, base_topic)
+    storage = get_storage(hass)
+    bridge.networkmap = await storage.async_load_networkmap()
+    bridge.on_networkmap = storage.schedule_save_networkmap
     try:
         await bridge.async_start()
     except Exception as err:  # noqa: BLE001 - MQTT nicht bereit
