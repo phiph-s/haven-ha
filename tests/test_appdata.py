@@ -27,6 +27,28 @@ def test_floorplan_ok_and_errors():
     assert appdata.validate_floorplan({**PLAN, "placements": [{"roomId": "k"}]}) != []
 
 
+def test_floorplan_version_2_passes():
+    # App 0.5.0: Räume als Polygone, Platzierungen als Rasterzellen, Draußen.
+    plan_v2 = {
+        "version": 2,
+        "grid": {"cols": 27, "rows": 28, "cellMeters": 0.5},
+        "rooms": [
+            {"id": "salon", "name": "Salon", "areaId": "salon",
+             "points": [[3, 3], [15, 3], [15, 10], [18, 10], [18, 15], [3, 15]]},
+        ],
+        "placements": [
+            {"entityId": "light.tischlampe_salon", "x": 12, "y": 5, "kind": "light"},
+            {"entityId": "sensor.sensor_terrasse_temperature", "x": 24, "y": 8, "deviceId": "0x00124b000000000d"},
+        ],
+        "coordinator": [19, 11],
+        "outside": {"margin": 3},
+        "updatedAt": 1763208000000,
+    }
+    assert appdata.validate_floorplan(plan_v2) == []
+    doc = appdata.build_plan_doc(plan_v2, 1763208000000)
+    assert appdata.read_plan_doc(doc)["plan"]["version"] == 2
+
+
 def test_widgets():
     ok = [
         {"id": "power", "type": "power", "entities": [], "options": {}},
