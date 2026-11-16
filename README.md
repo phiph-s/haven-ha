@@ -25,7 +25,7 @@ Die Integration ist die Gegenstelle der Flutter-App [Haven](https://github.com/p
 ### Manuell
 Den Ordner `custom_components/haven/` nach `/config/custom_components/haven/` kopieren (oder `haven.zip` aus dem neuesten Release dort entpacken), HA neu starten, Integration wie oben hinzufügen.
 
-Abonnierte Topics: `<base>/bridge/devices`, `bridge/groups`, `bridge/info`, `bridge/event`, `bridge/state` (online/offline), `bridge/response/#` (Antworten auf Requests) und `<base>/+` (Gerätezustände, `bridge` wird gefiltert). Für Friendly-Names mit `/` greift `+` nicht: Haven abonniert dafür das exakte Topic `<base>/<name>` und gleicht die Abos bei jeder neuen `bridge/devices` an.
+Abonnierte Topics: `<base>/+/availability` (Z2M-Verfügbarkeit, nur vorhanden wenn in Z2M an; Namen mit `/` wie bei den Zuständen exakt), `<base>/bridge/devices`, `bridge/groups`, `bridge/info`, `bridge/event`, `bridge/state` (online/offline), `bridge/response/#` (Antworten auf Requests) und `<base>/+` (Gerätezustände, `bridge` wird gefiltert). Für Friendly-Names mit `/` greift `+` nicht: Haven abonniert dafür das exakte Topic `<base>/<name>` und gleicht die Abos bei jeder neuen `bridge/devices` an.
 
 ## WebSocket-Befehle
 Alle Befehle: `{"id": N, "type": "...", ...}`, Antwort im HA-üblichen Format `{"id": N, "type": "result", "success": true, "result": ...}`. Fehler: `success: false`, `error.code` (`not_found` wenn Haven nicht geladen oder Gerät unbekannt). Texte sind deutsch. Die Beispiele sind gekürzt.
@@ -33,13 +33,14 @@ Alle Befehle: `{"id": N, "type": "...", ...}`, Antwort im HA-üblichen Format `{
 ### `haven/info`
 ```json
 {"domain": "haven", "version": "0.3.0", "api_version": 1,
- "features": ["light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "networkmap_background"], "loaded": true,
+ "features": ["light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "networkmap_background", "ghost_detection"], "loaded": true,
  "z2m": {"base_topic": "zigbee2mqtt", "bridge_state": "online", "info_received": true,
          "version": "2.x", "coordinator_type": "...", "permit_join": false,
          "channel": 15, "pan_id": 6754,
-         "device_count": 42, "group_count": 4, "devices_received": true, "groups_received": true}}
+         "device_count": 42, "group_count": 4, "devices_received": true, "groups_received": true,
+         "last_seen_enabled": true, "availability_enabled": false}}
 ```
-(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1). `version` kommt aus `manifest.json`.
+(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1), `ghost_detection` (`last_seen`, `last_seen_source`, `availability`, `haven/zigbee/enable_last_seen`, ab 0.5.2). `z2m.last_seen_enabled` ist `config.advanced.last_seen != "disable"` aus `bridge/info`, `z2m.availability_enabled` ist `config.availability` (Z2M: Standard aus); beide `null`, solange `bridge/info` fehlt. `version` kommt aus `manifest.json`.
 
 ### `haven/rooms`
 Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gezählt werden nur Haupt-Entities (ohne `entity_category`, nicht deaktiviert, nicht versteckt).
@@ -74,8 +75,13 @@ Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gez
               "vendor": "HOBEIAN", "model": "ZG-204ZL", "description": "Luminance motion sensor",
               "power_source": "Battery", "supported": true, "disabled": false, "interview_completed": true,
               "image": "https://www.zigbee2mqtt.io/images/devices/ZG-204ZL.png",
-              "device_type": "motion", "capabilities": []}]}
+              "device_type": "motion", "capabilities": [],
+              "last_seen": "2026-04-29T08:15:00+00:00", "last_seen_source": "z2m", "availability": "online"}]}
 ```
+**Zuletzt gesehen** (ab 0.5.2, Feature `ghost_detection`), je Gerät, in `haven/zigbee/devices` und `haven/zigbee/device`:
+- `last_seen`: ISO 8601 (UTC) oder `null`. Quelle in dieser Reihenfolge: (1) `last_seen` im Gerätezustand, wenn die Z2M-Option `advanced.last_seen` an ist (ISO-Text oder Millisekunden; das ist Z2Ms eigener Wert, auch nach einem Z2M-Neustart richtig), (2) `nodes[].lastSeen` (ms) der zuletzt gemessenen Netzkarte (Cache bzw. Store). Der Empfangszeitpunkt beliebiger MQTT-Meldungen zählt bewusst nicht: Z2M veröffentlicht beim Start die gespeicherten Zustände aller Geräte, das ließe Geister frisch aussehen.
+- `last_seen_source`: `"z2m"`, `"networkmap"` oder `null`.
+- `availability`: `"online"`, `"offline"` oder `null` (Z2M-Verfügbarkeit aus `<base>/<name>/availability`, Payload `{"state":"online"}` oder Text; `null` ohne Meldung). Änderungen kommen in `haven/subscribe_zigbee` als `{"kind": "availability", "ieee", "availability"}`.
 `device_type`: `light, plug_meter, switch, relay, climate_sensor, motion, presence, contact, remote, knob, thermostat, unknown`. `capabilities` bei Lichtern: `brightness, color_temp, color_xy, color_hs`.
 
 ### `haven/zigbee/device` (`{"ieee": "0x..."}`)
@@ -160,6 +166,12 @@ Topic: `bridge/request/device/interview`, Payload `{id}` (IEEE).
 Topic: `bridge/request/device/remove`, Payload `{id, force}`.
 ```json
 {"type": "haven/zigbee/remove", "ieee": "0x...", "force": false} → {"ok": true}
+```
+
+### `haven/zigbee/enable_last_seen`
+Nur Admin, ab 0.5.2. Schaltet die Z2M-Option `advanced.last_seen` ein. Topic `bridge/request/options`, Payload `{"options": {"advanced": {"last_seen": "ISO_8601"}}}`. Annahme (Z2M 2.x, nur aus dem Gedächtnis, nicht an einem laufenden Z2M geprüft): Z2M führt die Option mit den gespeicherten Einstellungen zusammen und meldet in der Antwort `restart_required`. Ob die Option ohne Neustart greift, hängt von Z2M ab; Haven reicht `restart_required` durch.
+```json
+{"type": "haven/zigbee/enable_last_seen"} → {"ok": true, "restart_required": true}
 ```
 
 ### `haven/zigbee/permit_join`
@@ -317,7 +329,7 @@ Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, melde
 ```
 cd integration && python3 -m pytest -q
 ```
-Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich, Zustand und Ablauf der Hintergrund-Netzmessung), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration), `motion` (Bedingungen, Besitz-Automat, Befehle, Validierung, Migration). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `motion_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
+Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich, Zustand und Ablauf der Hintergrund-Netzmessung), `throttle`, `statecache` (auch Verfügbarkeits-Topics), `lastseen` (Quellen-Priorität, Formate, Verfügbarkeit, Option), `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration), `motion` (Bedingungen, Besitz-Automat, Befehle, Validierung, Migration). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `motion_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
 
 Registry-Zugriffe laufen ohne `dev_reg.devices.values()` / `ent_reg.entities.values()` (ab HA 2027.9 veraltet): `haven/rooms` über `async_list_areas`, `dr/er.async_entries_for_area`, `er.async_entries_for_device`, Geräte ohne Bereich über `dr.async_entries_for_config_entry` aller Config-Entries, Lichter ohne Bereich über `hass.states.async_all("light")`. Die HA-Zuordnung der Zigbee-Geräte (`area_id`, `ha_entities`) liest nur Geräte der MQTT-Config-Entries. Geräte ganz ohne Config-Entry fehlen in `unassigned`.
 

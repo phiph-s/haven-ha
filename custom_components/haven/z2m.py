@@ -24,12 +24,20 @@ from .commands import (
     TransactionTracker,
     Z2MError,
     build_networkmap,
+    build_last_seen_option,
     build_networkmap_cache,
     describe_networkmap_error,
     request_topic,
 )
 from .const import MAX_EVENTS
 from .exposes import classify
+from .lastseen import (
+    availability_enabled,
+    last_seen_enabled,
+    networkmap_last_seen,
+    parse_availability,
+    resolve_last_seen,
+)
 from .statecache import StateCache
 
 if TYPE_CHECKING:
@@ -65,9 +73,11 @@ class Z2MBridge:
         self._listeners: list[Listener] = []
         self._unsubs: list[Callable[[], None]] = []
         self._slash_unsubs: dict[str, Callable[[], None]] = {}
+        self._slash_av_unsubs: dict[str, Callable[[], None]] = {}
         self._slash_lock: asyncio.Lock | None = None
         self.tracker = TransactionTracker()
         self.state_cache = StateCache(self.base_topic)
+        self.availability: dict[str, str] = {}  # ieee -> "online" | "offline"
         self.networkmap: dict[str, Any] | None = None  # {nodes, links, timestamp}
         self.networkmap_job = NetworkmapJob()
         self._networkmap_task: asyncio.Task[None] | None = None
@@ -111,6 +121,17 @@ class Z2MBridge:
         def _on_device_message(msg: Any) -> None:
             self.handle_device_message(msg.topic, msg.payload)
 
+        @callback
+        def _on_availability(msg: Any) -> None:
+            self.handle_availability_message(msg.topic, msg.payload)
+
+        self._availability_cb = _on_availability
+        self._unsubs.append(
+            await mqtt.async_subscribe(
+                self.hass, self.state_cache.availability_wildcard, _on_availability, qos=0, encoding="utf-8"
+            )
+        )
+
         self._device_msg_cb = _on_device_message
         self._unsubs.append(
             await mqtt.async_subscribe(
@@ -135,12 +156,21 @@ class Z2MBridge:
                     self._slash_unsubs[name] = await mqtt.async_subscribe(
                         self.hass, topic, self._device_msg_cb, qos=0, encoding="utf-8"
                     )
+            wanted_av = self.state_cache.slash_availability_topics()
+            for name in [n for n in self._slash_av_unsubs if n not in wanted_av]:
+                self._slash_av_unsubs.pop(name)()
+            for name, topic in wanted_av.items():
+                if name not in self._slash_av_unsubs:
+                    self._slash_av_unsubs[name] = await mqtt.async_subscribe(
+                        self.hass, topic, self._availability_cb, qos=0, encoding="utf-8"
+                    )
 
     def stop(self) -> None:
-        for unsub in [*self._unsubs, *self._slash_unsubs.values()]:
+        for unsub in [*self._unsubs, *self._slash_unsubs.values(), *self._slash_av_unsubs.values()]:
             unsub()
         self._unsubs.clear()
         self._slash_unsubs.clear()
+        self._slash_av_unsubs.clear()
         self.stop_networkmap()
         self.tracker.cancel_all()
         self._listeners.clear()
@@ -186,6 +216,8 @@ class Z2MBridge:
         self._classified.clear()
         self.devices_received = True
         self.state_cache.set_names({d.get("friendly_name"): i for i, d in self.devices.items() if d.get("friendly_name")})
+        for ieee in [i for i in self.availability if i not in self.devices]:
+            del self.availability[ieee]
         if self.hass is not None:
             self.hass.async_create_task(self._async_sync_slash_subs())
         self._notify("devices", None)
@@ -225,6 +257,16 @@ class Z2MBridge:
         if result is not None:
             ieee, values = result
             self._notify("device_state", {"ieee": ieee, "values": values})
+
+    def handle_availability_message(self, topic: str, payload: str | bytes) -> None:
+        """``<base>/<friendly_name>/availability``: merkt ``online``/``offline`` je Gerät."""
+        ieee = self.state_cache.availability_ieee(topic)
+        state = parse_availability(payload)
+        if ieee is None or state is None:
+            return
+        if self.availability.get(ieee) != state:
+            self.availability[ieee] = state
+            self._notify("availability", {"ieee": ieee, "availability": state})
 
     def handle_response(self, payload: str | bytes, topic: str | None = None) -> None:
         """``<base>/bridge/response/...``: ordnet die Antwort ihrer Anfrage zu."""
@@ -335,6 +377,11 @@ class Z2MBridge:
         self.networkmap_job.start()
         return await self._async_measure_networkmap()
 
+    async def async_enable_last_seen(self) -> dict[str, Any]:
+        """Schaltet ``advanced.last_seen`` in Z2M ein (``bridge/request/options``)."""
+        data = await self.async_request("options", build_last_seen_option())
+        return {"ok": True, "restart_required": bool(data.get("restart_required", False))}
+
     def stop_networkmap(self) -> None:
         if self._networkmap_task is not None and not self._networkmap_task.done():
             self._networkmap_task.cancel()
@@ -366,10 +413,17 @@ class Z2MBridge:
         classified = self.classified(ieee)
         return classified["device_type"] if classified else "unknown"
 
+    def last_seen_for(self, ieee: str) -> tuple[str | None, str | None]:
+        """``(last_seen ISO, Quelle)`` je IEEE, siehe :mod:`lastseen`."""
+        state_value = self.state_cache.states.get(ieee, {}).get("last_seen")
+        nodes = (self.networkmap or {}).get("nodes")
+        return resolve_last_seen(state_value, networkmap_last_seen(nodes).get(ieee))
+
     def device_summary(self, ieee: str) -> dict[str, Any] | None:
         device = self.devices.get(ieee)
         if device is None:
             return None
+        last_seen, last_seen_source = self.last_seen_for(ieee)
         definition = device.get("definition") or {}
         classified = self.classified(ieee) or {}
         return {
@@ -386,6 +440,9 @@ class Z2MBridge:
             "image": image_url(definition.get("model")),
             "device_type": classified.get("device_type", "unknown"),
             "capabilities": classified.get("capabilities", []),
+            "last_seen": last_seen,
+            "last_seen_source": last_seen_source,
+            "availability": self.availability.get(ieee),
         }
 
     def device_detail(self, ieee: str) -> dict[str, Any] | None:
@@ -506,5 +563,7 @@ class Z2MBridge:
             "group_count": len(self.groups),
             "devices_received": self.devices_received,
             "groups_received": self.groups_received,
+            "last_seen_enabled": last_seen_enabled(self.info),
+            "availability_enabled": availability_enabled(self.info),
         }
 

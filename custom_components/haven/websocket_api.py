@@ -59,6 +59,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_zigbee_identify,
         ws_zigbee_interview,
         ws_zigbee_remove,
+        ws_zigbee_enable_last_seen,
         ws_zigbee_permit_join,
         ws_zigbee_state,
         ws_zigbee_networkmap,
@@ -157,7 +158,7 @@ async def ws_zigbee_groups(
 def ws_subscribe_zigbee(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Pusht Änderungen (devices, groups, info, state, event) bis zum Abmelden.
+    """Pusht Änderungen (devices, groups, info, state, event, availability) bis zum Abmelden.
 
     ``kind: "state"`` gibt es in zwei Formen: Bridge-Zustand (wie ``info``) und
     Gerätezustand ``{ieee, values}`` (höchstens 4/s je Gerät, Werte zusammengeführt).
@@ -197,6 +198,8 @@ def ws_subscribe_zigbee(
             data = {"groups": bridge.groups_summary()}
         elif kind == "event":
             data = {"event": payload}
+        elif kind == "availability":
+            data = payload
         else:  # info, state
             data = bridge.info_summary()
         _send({"kind": kind, **data})
@@ -527,6 +530,15 @@ async def ws_zigbee_remove(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str
     _target(bridge, msg["ieee"])
     await bridge.async_request("device/remove", build_remove(msg["ieee"], msg["force"]))
     return {"ok": True}
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): "haven/zigbee/enable_last_seen"})
+@websocket_api.async_response
+@_z2m_write
+async def ws_zigbee_enable_last_seen(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
+    """Schaltet die Z2M-Option ``advanced.last_seen`` auf ``ISO_8601``."""
+    return await bridge.async_enable_last_seen()
 
 
 @websocket_api.require_admin

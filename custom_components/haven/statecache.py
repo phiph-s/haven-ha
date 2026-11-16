@@ -51,3 +51,20 @@ class StateCache:
             return None
         self.states.setdefault(ieee, {}).update(values)
         return ieee, values
+
+    # --- Verfügbarkeit: ``<base>/<friendly_name>/availability`` -------------------------
+
+    @property
+    def availability_wildcard(self) -> str:
+        return f"{self.base}/+/availability"
+
+    def slash_availability_topics(self) -> dict[str, str]:
+        """Friendly-Name -> exaktes Verfügbarkeits-Topic, für Namen mit ``/``."""
+        return {n: f"{self.base}/{n}/availability" for n in sorted(self._names) if "/" in n}
+
+    def availability_ieee(self, topic: str) -> str | None:
+        """IEEE zu einem Verfügbarkeits-Topic, ``None`` bei Gruppen, Bridge oder Fremdem."""
+        prefix, suffix = self.base + "/", "/availability"
+        if not (topic.startswith(prefix) and topic.endswith(suffix)):
+            return None
+        return self._names.get(topic[len(prefix) : -len(suffix)])

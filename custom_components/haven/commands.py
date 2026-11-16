@@ -72,6 +72,15 @@ def build_permit_join(time: int, device: str | None = None) -> dict[str, Any]:
     return payload
 
 
+def build_last_seen_option() -> dict[str, Any]:
+    """``bridge/request/options``: schaltet ``advanced.last_seen`` auf ``ISO_8601`` (Z2M 2.x).
+
+    Annahme: Z2M erwartet ``{"options": {"advanced": {"last_seen": ...}}}`` und führt die Option
+    mit den gespeicherten Einstellungen zusammen. Die Antwort enthält ``restart_required``.
+    """
+    return {"options": {"advanced": {"last_seen": "ISO_8601"}}}
+
+
 def build_networkmap() -> dict[str, Any]:
     return {"type": "raw", "routes": False}
 
