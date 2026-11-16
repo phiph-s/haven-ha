@@ -293,6 +293,27 @@ class Z2MBridge:
         except Exception as err:  # noqa: BLE001
             raise Z2MError("mqtt_error", f"MQTT-Senden fehlgeschlagen: {err}") from err
 
+    async def async_wait_groups(
+        self, predicate: Callable[[list[dict[str, Any]]], bool], timeout: float
+    ) -> bool:
+        """Wartet, bis ``bridge/groups`` ``predicate`` erfüllt. ``False`` nach ``timeout``."""
+        if predicate(self.groups):
+            return True
+        assert self.hass is not None
+        fut: asyncio.Future[bool] = self.hass.loop.create_future()
+
+        def _listener(kind: str, _payload: Any) -> None:
+            if kind == "groups" and not fut.done() and predicate(self.groups):
+                fut.set_result(True)
+
+        remove = self.add_listener(_listener)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            remove()
+
     async def async_request(
         self, endpoint: str, payload: dict[str, Any], timeout: float = DEFAULT_TIMEOUT
     ) -> dict[str, Any]:

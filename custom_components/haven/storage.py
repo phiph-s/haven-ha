@@ -1,4 +1,4 @@
-"""Persistenz der App-Daten in ``.storage`` (``haven.floorplan``, ``haven.widgets``, ``haven.prefs``, ``haven.networkmap``)."""
+"""Persistenz der App-Daten in ``.storage`` (``haven.floorplan``, ``haven.widgets``, ``haven.prefs``, ``haven.networkmap``, ``haven.scenes``)."""
 
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ class HavenStorage:
         self._widgets = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.widgets")
         self._prefs = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.prefs")
         self._networkmap = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.networkmap")
+        self._scenes = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.scenes")
+        self._scene_looks: dict[str, Any] | None = None
 
     async def async_get_plan_doc(self) -> dict[str, Any]:
         """``{"plan": {...}|None, "updated_at": ...|None}``."""
@@ -76,6 +78,22 @@ class HavenStorage:
 
     async def async_set_prefs(self, prefs: dict[str, Any]) -> None:
         await self._prefs.async_save({"prefs": prefs})
+
+    async def async_get_scene_looks(self) -> dict[str, Any]:
+        """Looks der Szenen, ``{"<group_id>:<scene_id>": {colors, brightness, kelvin, stored_at}}``."""
+        if self._scene_looks is None:
+            data = await self._scenes.async_load()
+            looks = data.get("looks") if isinstance(data, dict) else None
+            self._scene_looks = dict(looks) if isinstance(looks, dict) else {}
+        return self._scene_looks
+
+    def scene_looks_cached(self) -> dict[str, Any]:
+        """Ohne Laden (für synchrone Callbacks), leer bis zum ersten Laden."""
+        return self._scene_looks or {}
+
+    async def async_set_scene_looks(self, looks: dict[str, Any]) -> None:
+        self._scene_looks = dict(looks)
+        await self._scenes.async_save({"looks": self._scene_looks})
 
 
 def get_storage(hass: HomeAssistant) -> HavenStorage:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
@@ -35,6 +37,19 @@ from .commands import (
 )
 from .const import DOMAIN, EVENT_DATA_UPDATED, FEATURES, STATE_MAX_PER_SECOND
 from .groupsync import plan_group_sync
+from .scenes import (
+    attach_looks,
+    find_group,
+    plan_recall,
+    plan_remove,
+    plan_rename,
+    plan_store,
+    prune_looks,
+    removed,
+    scene_key,
+    stored,
+    validate_look,
+)
 from .rooms import AreaData, DeviceData, EntityData, assemble_rooms
 from .storage import get_storage
 from .throttle import Throttle
@@ -69,6 +84,10 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_widgets_set,
         ws_prefs_get,
         ws_prefs_set,
+        ws_zigbee_scene_store,
+        ws_zigbee_scene_rename,
+        ws_zigbee_scene_remove,
+        ws_zigbee_scene_recall,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -150,7 +169,8 @@ async def ws_zigbee_groups(
 ) -> None:
     if (bridge := _bridge_or_error(hass, connection, msg["id"])) is None:
         return
-    connection.send_result(msg["id"], {"groups": bridge.groups_summary()})
+    looks = await get_storage(hass).async_get_scene_looks()
+    connection.send_result(msg["id"], {"groups": attach_looks(bridge.groups_summary(), looks)})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "haven/subscribe_zigbee"})
@@ -195,7 +215,7 @@ def ws_subscribe_zigbee(
         if kind == "devices":
             data: Any = {"devices": _devices_with_ha(hass, bridge)}
         elif kind == "groups":
-            data = {"groups": bridge.groups_summary()}
+            data = {"groups": attach_looks(bridge.groups_summary(), get_storage(hass).scene_looks_cached())}
         elif kind == "event":
             data = {"event": payload}
         elif kind == "availability":
@@ -697,3 +717,113 @@ async def ws_prefs_set(
     await get_storage(hass).async_set_prefs(prefs)
     hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("prefs", resolve_updated_at(None, prefs)))
     connection.send_result(msg["id"], {"ok": True, "prefs": prefs})
+
+
+# --- Szenen der Z2M-Gruppen (Feature ``scenes``) ------------------------------------
+
+# So lange wartet ein Befehl, bis ``bridge/groups`` die Änderung zeigt
+SCENE_CONFIRM_TIMEOUT = 5.0
+# Zwei schnelle „Neu“-Befehle dürfen nicht dieselbe freie ID bekommen
+_SCENE_LOCK = asyncio.Lock()
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/zigbee/scene_store",
+        vol.Required("group_id"): int,
+        vol.Optional("scene_id"): vol.Any(int, None),
+        vol.Optional("name"): vol.Any(str, None),
+        vol.Optional("look"): vol.Any(dict, None),
+    }
+)
+@websocket_api.async_response
+@_z2m_write
+async def ws_zigbee_scene_store(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
+    """Speichert den aktuellen Zustand der Gruppe als neue Szene oder überschreibt eine."""
+    group_id = msg["group_id"]
+    look = validate_look(msg["look"]) if msg.get("look") is not None else None
+    async with _SCENE_LOCK:
+        group = find_group(bridge.groups, group_id)
+        scene_id, name, payload = plan_store(group, msg.get("name"), msg.get("scene_id"))
+        await bridge.async_publish_set(group["friendly_name"], payload)
+        confirmed = await bridge.async_wait_groups(stored(group_id, scene_id, name), SCENE_CONFIRM_TIMEOUT)
+    storage = get_storage(hass)
+    looks = dict(await storage.async_get_scene_looks())
+    key = scene_key(group_id, scene_id)
+    if look is None:
+        looks.pop(key, None)  # der alte Look passt nicht mehr zum neuen Zustand
+    else:
+        looks[key] = {**look, "stored_at": datetime.now(timezone.utc).isoformat()}
+    if confirmed:
+        looks = prune_looks(looks, bridge.groups)
+    await storage.async_set_scene_looks(looks)
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "scene_id": scene_id,
+        "name": name,
+        "created": msg.get("scene_id") is None,
+        "confirmed": confirmed,
+    }
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/zigbee/scene_rename",
+        vol.Required("group_id"): int,
+        vol.Required("scene_id"): int,
+        vol.Required("name"): str,
+    }
+)
+@websocket_api.async_response
+@_z2m_write
+async def ws_zigbee_scene_rename(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
+    group_id, scene_id = msg["group_id"], msg["scene_id"]
+    async with _SCENE_LOCK:
+        group = find_group(bridge.groups, group_id)
+        name, payload = plan_rename(group, scene_id, msg["name"])
+        await bridge.async_publish_set(group["friendly_name"], payload)
+        confirmed = await bridge.async_wait_groups(stored(group_id, scene_id, name), SCENE_CONFIRM_TIMEOUT)
+    return {"ok": True, "group_id": group_id, "scene_id": scene_id, "name": name, "confirmed": confirmed}
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/zigbee/scene_remove",
+        vol.Required("group_id"): int,
+        vol.Required("scene_id"): int,
+    }
+)
+@websocket_api.async_response
+@_z2m_write
+async def ws_zigbee_scene_remove(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
+    group_id, scene_id = msg["group_id"], msg["scene_id"]
+    async with _SCENE_LOCK:
+        group = find_group(bridge.groups, group_id)
+        payload = plan_remove(group, scene_id)
+        await bridge.async_publish_set(group["friendly_name"], payload)
+        confirmed = await bridge.async_wait_groups(removed(group_id, scene_id), SCENE_CONFIRM_TIMEOUT)
+    storage = get_storage(hass)
+    looks = dict(await storage.async_get_scene_looks())
+    if looks.pop(scene_key(group_id, scene_id), None) is not None:
+        await storage.async_set_scene_looks(looks)
+    return {"ok": True, "group_id": group_id, "scene_id": scene_id, "confirmed": confirmed}
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/zigbee/scene_recall",
+        vol.Required("group_id"): int,
+        vol.Required("scene_id"): int,
+    }
+)
+@websocket_api.async_response
+@_z2m_write
+async def ws_zigbee_scene_recall(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
+    """Ruft eine Szene auf. Ohne Admin, wie ``scene.turn_on``."""
+    group = find_group(bridge.groups, msg["group_id"])
+    await bridge.async_publish_set(group["friendly_name"], plan_recall(group, msg["scene_id"]))
+    return {"ok": True}

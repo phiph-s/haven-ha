@@ -33,14 +33,14 @@ Alle Befehle: `{"id": N, "type": "...", ...}`, Antwort im HA-üblichen Format `{
 ### `haven/info`
 ```json
 {"domain": "haven", "version": "0.3.0", "api_version": 1,
- "features": ["light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "networkmap_background", "ghost_detection"], "loaded": true,
+ "features": ["light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "networkmap_background", "ghost_detection", "scenes"], "loaded": true,
  "z2m": {"base_topic": "zigbee2mqtt", "bridge_state": "online", "info_received": true,
          "version": "2.x", "coordinator_type": "...", "permit_join": false,
          "channel": 15, "pan_id": 6754,
          "device_count": 42, "group_count": 4, "devices_received": true, "groups_received": true,
          "last_seen_enabled": true, "availability_enabled": false}}
 ```
-(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1), `ghost_detection` (`last_seen`, `last_seen_source`, `availability`, `haven/zigbee/enable_last_seen`, ab 0.5.2). `z2m.last_seen_enabled` ist `config.advanced.last_seen != "disable"` aus `bridge/info`, `z2m.availability_enabled` ist `config.availability` (Z2M: Standard aus); beide `null`, solange `bridge/info` fehlt. `version` kommt aus `manifest.json`.
+(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1), `ghost_detection` (`last_seen`, `last_seen_source`, `availability`, `haven/zigbee/enable_last_seen`, ab 0.5.2), `scenes` (`haven/zigbee/scene_*`, `look` an den Szenen von `haven/zigbee/groups`, ab 0.6.0). `z2m.last_seen_enabled` ist `config.advanced.last_seen != "disable"` aus `bridge/info`, `z2m.availability_enabled` ist `config.availability` (Z2M: Standard aus); beide `null`, solange `bridge/info` fehlt. `version` kommt aus `manifest.json`.
 
 ### `haven/rooms`
 Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gezählt werden nur Haupt-Entities (ohne `entity_category`, nicht deaktiviert, nicht versteckt).
@@ -106,8 +106,9 @@ Feature-Felder: `property` (Z2M-Schlüssel), `label`, `help`, `area`, `group`, `
 ```json
 {"groups": [{"id": 3, "friendly_name": "ZGKochbereich",
              "members": [{"ieee": "0x00124b0000000012", "endpoint": 11, "friendly_name": "Kochbereich Arbeitslicht 2", "device_type": "light"}],
-             "scenes": [{"id": 0, "name": "Full"}]}]}
+             "scenes": [{"id": 0, "name": "Full", "look": null}]}]}
 ```
+`look` (Feature `scenes`): Farben beim Speichern über Haven, sonst `null`, siehe `haven/zigbee/scene_store`.
 
 ### `haven/subscribe_zigbee`
 Antwort sofort `result: null`, danach Events (`{"id": N, "type": "event", "event": {...}}`) bis `unsubscribe_events` mit der Abo-ID. `kind`:
@@ -205,6 +206,23 @@ Ende der Hintergrundmessung: HA-Ereignis `haven_networkmap_updated` mit `{ok: tr
    "running": false, "started_at": null, "last_error": null}
 ```
 Ungeprüft auf echtem HA: der Ablauf mit echtem Z2M (Version 0.5.1 ist nur mit den Tests geprüft).
+
+### Szenen: `haven/zigbee/scene_store`, `scene_rename`, `scene_remove`, `scene_recall` (Feature `scenes`)
+Szenen liegen in Z2M auf den Geräten einer Gruppe. Haven vergibt die IDs selbst, die App arbeitet nur mit Namen. Befehle gehen an `<base>/<gruppe>/set`, Z2M antwortet darauf nicht. Haven wartet deshalb bis 5 s, bis `bridge/groups` die Änderung zeigt, und meldet das als `confirmed`.
+
+| Befehl | Parameter | Antwort |
+|---|---|---|
+| `scene_store` (Admin) | `{group_id, name?, scene_id?, look?}` | `{ok, group_id, scene_id, name, created, confirmed}` |
+| `scene_rename` (Admin) | `{group_id, scene_id, name}` | `{ok, group_id, scene_id, name, confirmed}` |
+| `scene_remove` (Admin) | `{group_id, scene_id}` | `{ok, group_id, scene_id, confirmed}` |
+| `scene_recall` | `{group_id, scene_id}` | `{ok}` |
+
+- `scene_store` speichert den **aktuellen Zustand** aller Gruppenmitglieder (`scene_store` von Z2M). Ohne `scene_id` entsteht eine neue Szene mit der kleinsten freien ID (0 bis 255), der Name muss frei sein (Groß- und Kleinschreibung zählt nicht), sonst `name_taken`. Mit `scene_id` wird die Szene überschrieben, ID und (ohne `name`) Name bleiben, Haven-Automationen mit dieser ID laufen also weiter.
+- `look`: `{colors: ["#rrggbb", ...] (1–3), brightness: 0–100, kelvin: 1000–10000|null}`, beschreibt die Szene für die Karten der App. Haven speichert es in `.storage/haven.scenes` mit `stored_at`. Speichern ohne `look` löscht ein altes. Looks von Szenen, die es nicht mehr gibt, fallen beim nächsten Speichern weg.
+- `scene_recall` braucht keinen Admin (wie `scene.turn_on`) und hängt nicht an den Szenen-Entities von HA, die nach einer Umbenennung ihre alte `entity_id` behalten.
+- Fehler: `not_found` (Gruppe oder Szene), `name_taken`, `full`, `invalid_format`, `bridge_offline`.
+
+Ungeprüft auf echtem HA: ob Z2M nach jeder Szenenänderung `bridge/groups` neu sendet (sonst `confirmed: false` nach 5 s) und wie ausgeschaltete Lampen in der Szene landen.
 
 ### `haven/floorplan/get` und `haven/floorplan/set`
 Speicher: `.storage/haven.floorplan` (Store-Version 1, Inhalt `{"plan": {...}, "updated_at": ...}`). `plan` ist das Dokument von `HavenFloorPlan.toJson` der App. Geprüft wird nur: Objekt, `version` (Zahl), `rooms` (Liste, jeder Eintrag mit `id`), `placements` (Liste, jeder Eintrag mit `entityId`), optional `furniture` (Liste, jeder Eintrag mit `id`). Geometrie prüft die App. Unbekannte Felder im `plan` bleiben unverändert erhalten.
