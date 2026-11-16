@@ -14,9 +14,10 @@ from .automations import gesture_from_name, plan_to_json
 from .automations_runtime import get_engine
 from .commands import Z2MError
 from .const import EVENT_DATA_UPDATED
+from .motion_runtime import TEST_ACTIONS
 
-# Gerätetypen mit Aktionen (Drehregler, Taster), für die Konflikt-Suche
-_ACTION_TYPES = ("knob", "remote")
+# Gerätetypen für die Konflikt-Suche (Drehregler, Taster, Melder)
+_ACTION_TYPES = ("knob", "remote", "motion", "presence")
 
 
 @callback
@@ -28,7 +29,7 @@ def async_register_automation_commands(hass: HomeAssistant) -> None:
 def _device_automations(hass: HomeAssistant) -> dict[str, list[str]]:
     """IEEE -> HA-Automationen, die das Gerät nennen (Device-Trigger, Bedingungen, Aktionen).
 
-    Nur für Drehregler und Taster. Ohne geladene ``automation``-Integration leer.
+    Für Drehregler, Taster und Melder. Ohne geladene ``automation``-Integration leer.
     """
     from .websocket_api import _ha_info  # noqa: PLC0415
 
@@ -120,7 +121,9 @@ async def ws_automations_delete(
     {
         vol.Required("type"): "haven/automations/test",
         vol.Required("id"): str,
-        vol.Required("action"): vol.In(["rotate_left", "rotate_right", "single", "double", "hold"]),
+        vol.Required("action"): vol.In(
+            ["rotate_left", "rotate_right", "single", "double", "hold", *TEST_ACTIONS]
+        ),
     }
 )
 @websocket_api.async_response
@@ -129,6 +132,18 @@ async def ws_automations_test(
 ) -> None:
     engine = get_engine(hass)
     await engine.async_load()
+    if msg["action"] in TEST_ACTIONS:
+        automation = engine.get(msg["id"])
+        if engine.bridge is None or automation is None or automation.get("type") != "room_motion":
+            connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Kein Bewegungslicht mit dieser ID")
+            return
+        try:
+            plan, state = engine.motion.test(automation, msg["action"])
+        except Z2MError as err:
+            connection.send_error(msg["id"], err.code, err.message)
+            return
+        connection.send_result(msg["id"], {"ok": True, "plan": plan_to_json(plan), "motion": state})
+        return
     gesture = gesture_from_name(msg["action"])
     if engine.bridge is None or gesture is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Haven ist nicht eingerichtet oder nicht geladen")

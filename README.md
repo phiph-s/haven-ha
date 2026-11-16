@@ -224,9 +224,9 @@ Nach jedem erfolgreichen `haven/floorplan/set`, `haven/widgets/set` und `haven/p
 - Einschränkung: HA erlaubt Nicht-Administratoren `subscribe_events` nur für Event-Typen aus der `SUBSCRIBE_ALLOWLIST` von HA. `haven_data_updated` steht nicht darin, das Abo funktioniert also nur mit einem Administrator-Konto (die App nutzt dessen Long-Lived-Token). Das stammt aus dem Wissen über den HA-Quellcode, nicht aus einem Test.
 
 ## Haven-Automationen
-Komplexere Abläufe laufen direkt in Haven statt als HA-Automation. Bisher gibt es den Typ `room_knob`: Drehregler und Taster (Z2M-Geräte mit `action`) steuern das Licht eines Raums. `haven/info.features` enthält dann `automations`.
+Komplexere Abläufe laufen direkt in Haven statt als HA-Automation. Es gibt die Typen `room_knob` und `room_motion` (Bewegungslicht, eigener Abschnitt unten). `room_knob`: Drehregler und Taster (Z2M-Geräte mit `action`) steuern das Licht eines Raums. `haven/info.features` enthält dann `automations`.
 
-**Modell** (`.storage/haven.automations`, Store-Version 1.2, Migration von 1.1 in `automations.migrate_store`):
+**Modell** (`.storage/haven.automations`, Store-Version 1.3, Migration von 1.1 und 1.2 in `automations.migrate_store`):
 ```json
 {"id": "3f9a1c0b2e4d", "type": "room_knob", "name": "Drehregler Salon", "enabled": true,
  "room_area_id": "salon", "devices": ["0x00124b0000000016"],
@@ -247,9 +247,50 @@ Komplexere Abläufe laufen direkt in Haven statt als HA-Automation. Bisher gibt 
 | `haven/automations/list` | – | `{automations: [{..., last_triggered: {at, action}\|null}], rooms: {area_id: {group, group_id, scenes, lights, has_lights}}, device_automations: {ieee: ["automation.x"]}, running}` |
 | `haven/automations/set` (Admin) | `{automation: {...}}` (ohne `id` = neu) | `{ok, automation}` |
 | `haven/automations/delete` (Admin) | `{id}` | `{ok}` |
-| `haven/automations/test` (Admin) | `{id, action}` mit `rotate_left`, `rotate_right`, `single`, `double`, `hold` | `{ok, plan: {action, mqtt, services, scene, note}}` |
+| `haven/automations/test` (Admin) | `{id, action}` mit `rotate_left`, `rotate_right`, `single`, `double`, `hold` (Drehregler) bzw. `motion`, `clear`, `takeover` (Bewegungslicht) | `{ok, plan: {action, mqtt, services, scene, note}}`, bei Bewegungslicht zusätzlich `motion` (Zustand) |
 
 `device_automations` nennt je Drehregler/Taster die HA-Automationen, die das Gerät verwenden (`automation.automations_with_device`), damit die App doppelte Auslösung erkennt. Nach `set` und `delete` feuert `haven_data_updated` mit `kind: "automations"`. Fehler: `invalid_format`, `not_found`, `no_lights`, `device_taken`.
+
+### Bewegungslicht (`room_motion`)
+Melder (Z2M-Geräte mit `occupancy` oder `presence`) schalten das Licht eines Raums, aber nur unter Bedingungen. Wichtigster Punkt: Haven weiß, **wem das Licht gerade gehört**. Wer es heller dreht, bekommt nicht wieder die Szene.
+
+```json
+{"id": "a1b2c3d4e5f6", "type": "room_motion", "name": "Bewegungslicht Bad", "enabled": true,
+ "room_area_id": "bad", "devices": ["0x00124b0000000030"],
+ "options": {"windows": [{"from": "18:00", "to": "07:00"}],
+             "sun": {"from": {"event": "sunset", "offset": -30}, "until": {"event": "sunrise", "offset": 60}},
+             "lux": {"below": 30, "entity": null},
+             "light": {"mode": "scene", "scene": 2, "transition": 3},
+             "night": {"from": "23:00", "to": "06:00", "light": {"mode": "brightness", "brightness": 25, "color_temp": 2200}},
+             "delay": 120, "warn": true, "warn_seconds": 20, "relight": true, "manual_delay": null}}
+```
+- **Bedingungen** (alle müssen gelten, leer = keine Einschränkung): `windows` (HH:MM, auch über Mitternacht, mehrere), `sun` (`from`/`until` mit `event` `sunrise`/`sunset` und `offset` in Minuten, von Ereignis bis Ereignis, auch über Nacht), `lux` (`below` in lx, `entity` ein `sensor.`, `null` = `illuminance`-Sensor des Melders). Ein unbekannter Lux-Wert oder fehlende Sonnenzeiten blockieren nicht.
+- **Licht:** `mode: "scene"` mit `scene` (Z2M-Szene der Raumgruppe) oder `scene_entity` (`scene.*` aus HA), oder `mode: "brightness"` mit `brightness` 1 bis 254 und optional `color_temp` in Kelvin. `transition` in Sekunden. `night` wählt im zweiten Zeitfenster ein anderes Licht, sonst gelten dieselben Bedingungen.
+- **Nachlauf:** `delay` Sekunden (Standard 120) ohne Bewegung bis Aus. Meldet der Melder `presence`/`occupancy` an, läuft der Nachlauf erst ab dem Abfallen (zur Sicherheit spätestens nach 6 h).
+- **Optionen:** `warn` (20 s vor dem Aus auf 50 % dimmen, Bewegung stellt den vorherigen Zustand wieder her), `relight` (Bewegung bis 30 s nach dem automatischen Aus schaltet sofort wieder ein, ohne Bedingungen, Standard an), `manual_delay` (Sekunden, nach denen auch manuell übernommenes Licht ausgeht, Standard `null` = nie).
+- **Helligkeit nur bei Licht aus:** Ist das Licht an, misst der Sensor das eigene Licht. Darum zählt `lux` nur beim Einschalten.
+
+**Besitz-Logik** (`motion.step`, rein und getestet, Zustand je Raum `owner`, Zeitgeber, zuletzt gesetztes Licht):
+
+| `owner` | Bedeutung | Bewegung | Nachlauf vorbei |
+|---|---|---|---|
+| `none` | niemand (Licht aus, oder war schon an) | Licht aus und Bedingungen erfüllt: einschalten, `owner = motion`. Licht an: nichts tun | nichts |
+| `motion` | der Melder hat eingeschaltet | nur Nachlauf verlängern, **nie erneut die Szene setzen** | ausschalten, `owner = none` |
+| `manual` | jemand hat das Licht verstellt | nichts | nichts (außer `manual_delay`) |
+
+Übergänge: `motion` zu `manual` bei Übernahme, `motion`/`manual` zu `none`, sobald das Licht aus ist.
+
+**Erkennung der Übernahme:**
+1. Eigene Befehle öffnen ein Erwartungsfenster (1,5 s plus Übergangszeit): passende `state_changed` des Raums (Gruppe und Lampen) sind eigene und setzen nur die Vergleichshelligkeit.
+2. Danach zählt als Übernahme: Helligkeit weicht um mehr als 10 % (von 254) von der Vergleichshelligkeit ab, die Farbe ändert sich (Farbtemperatur um 20 mired, Farbton/Sättigung um 15, xy um 0,03) oder das Licht geht aus (dann `none`). Bei Szenen ist die erste Meldung danach die Vergleichsbasis.
+3. Dienstaufrufe der Engine tragen einen eigenen HA-`Context`. Ein `state_changed` mit fremdem `context.user_id` gilt sofort als Übernahme, auch ohne Abweichung. Wandschalter und Z2M-Bedienung ohne HA-Kontext erkennt Punkt 2.
+4. Haven-Drehregler im selben Raum melden die Übernahme direkt intern (`room_knob` ruft `motion.handle_knob`): Licht an danach heißt `manual`, Licht aus heißt `none`.
+
+**Laufzeit:** `motion_runtime.py`. Der Melder ist die `binary_sensor`-Entity mit `device_class` `presence`, `occupancy` oder `motion` aus den `ha_entities` des Geräts (per State-Abo), Lux der `illuminance`-Sensor desselben Geräts oder `lux.entity`. Sonnenzeiten aus `homeassistant.helpers.sun`. Der Nachlauf läuft über `async_call_later`. Befehle gehen wie bei `room_knob` per MQTT an die Raumgruppe (`scene_recall`, `state`/`brightness`/`color_temp`/`transition`), `scene_entity` und Räume ohne Gruppe über HA-Dienste. Der Zustand steht im Speicher und unter `runtime.motion` im Store. Nach einem Neustart setzt Haven den Nachlauf neu an, wenn der Melder gerade nicht aktiv ist.
+
+**Validierung:** Ein Melder darf nur in einer aktiven Bewegungslicht-Automation stecken (`device_taken`, „X meldet schon für Y“). Knob und Bewegungslicht im selben Raum sind erlaubt und verzahnt. Weitere Fehler: `invalid_format`, `not_found`, `no_lights`.
+
+**Ereignis** `haven_automation_triggered` mit `action` `motion_on`, `motion_extend`, `motion_off`, `takeover` oder `warn` und `state: {owner, phase, occupied, off_at, inactive, night, lux, detectors, lux_entity}`. `haven/automations/list` liefert dasselbe als `motion` je Automation. `phase`: `idle`, `motion`, `warn`, `manual`, `inactive` (`inactive`: `time`, `sun`, `lux`).
 
 ## Seitenleisten-Eintrag „Haven“ (Web-App in Home Assistant)
 Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, meldet Haven beim Laden des Config Entries einen Eintrag „Haven“ in der Seitenleiste an. Die App läuft dort direkt in Home Assistant, ohne Token und ohne Onboarding, im Hell- oder Dunkelmodus von HA.
@@ -265,7 +306,7 @@ Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, melde
 ```
 cd integration && python3 -m pytest -q
 ```
-Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
+Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich), `throttle`, `statecache`, `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration), `motion` (Bedingungen, Besitz-Automat, Befehle, Validierung, Migration). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `motion_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
 
 Registry-Zugriffe laufen ohne `dev_reg.devices.values()` / `ent_reg.entities.values()` (ab HA 2027.9 veraltet): `haven/rooms` über `async_list_areas`, `dr/er.async_entries_for_area`, `er.async_entries_for_device`, Geräte ohne Bereich über `dr.async_entries_for_config_entry` aller Config-Entries, Lichter ohne Bereich über `hass.states.async_all("light")`. Die HA-Zuordnung der Zigbee-Geräte (`area_id`, `ha_entities`) liest nur Geräte der MQTT-Config-Entries. Geräte ganz ohne Config-Entry fehlen in `unassigned`.
 

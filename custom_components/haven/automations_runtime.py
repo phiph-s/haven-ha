@@ -18,7 +18,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
 from .automations import (
@@ -46,6 +46,7 @@ from .automations import (
 )
 from .commands import Z2MError
 from .const import DOMAIN, EVENT_DATA_UPDATED
+from .motion_runtime import MotionRunner
 
 if TYPE_CHECKING:
     from .z2m import Z2MBridge
@@ -80,6 +81,7 @@ class AutomationEngine:
         self._estimates: dict[str, tuple[float, RoomState]] = {}
         self._rooms_cache: tuple[float, dict[str, RoomTarget]] | None = None
         self._excluded: list[str] = []
+        self.motion = MotionRunner(self)
 
     # --- Lebenszyklus ------------------------------------------------------------
 
@@ -95,12 +97,14 @@ class AutomationEngine:
         self.detach()
         self.bridge = bridge
         self._remove_listener = bridge.add_listener(self._on_bridge)
+        self.motion.sync()
 
     @callback
     def detach(self) -> None:
         if self._remove_listener is not None:
             self._remove_listener()
             self._remove_listener = None
+        self.motion.stop()
         for timer in self._timers.values():
             timer.cancel()
         self._timers.clear()
@@ -122,7 +126,17 @@ class AutomationEngine:
         return next((a for a in self.automations if a["id"] == automation_id), None)
 
     def list_public(self) -> list[dict[str, Any]]:
-        return [public_automation(a, self.runtime) for a in self.automations]
+        out = [public_automation(a, self.runtime) for a in self.automations]
+        for item in out:
+            if item.get("type") == "room_motion":
+                item["motion"] = self.motion.status(item)
+        return out
+
+    def _public(self, automation: dict[str, Any]) -> dict[str, Any]:
+        item = public_automation(automation, self.runtime)
+        if automation.get("type") == "room_motion":
+            item["motion"] = self.motion.status(automation)
+        return item
 
     def _schedule_save(self) -> None:
         self._store.async_delay_save(lambda: self._data, 2)
@@ -136,13 +150,14 @@ class AutomationEngine:
         automation = validate_automation(doc, self.automations, rooms, known)
         if not automation["name"]:
             room = (rooms or {}).get(automation["room_area_id"])
-            automation["name"] = default_name(room, automation["room_area_id"])
+            automation["name"] = default_name(room, automation["room_area_id"], automation["type"])
         items = [a for a in self.automations if a["id"] != automation["id"]]
         index = next((i for i, a in enumerate(self.automations) if a["id"] == automation["id"]), len(items))
         items.insert(index, automation)
         self._data["automations"] = items
         await self._store.async_save(self._data)
-        return public_automation(automation, self.runtime)
+        self.motion.sync()
+        return self._public(automation)
 
     async def async_delete(self, automation_id: str) -> bool:
         before = len(self.automations)
@@ -150,6 +165,8 @@ class AutomationEngine:
         if len(self.automations) == before:
             return False
         self.runtime["last_triggered"].pop(automation_id, None)
+        self.runtime.setdefault("motion", {}).pop(automation_id, None)
+        self.motion.sync()
         await self._store.async_save(self._data)
         return True
 
@@ -195,6 +212,7 @@ class AutomationEngine:
     def _on_bridge(self, kind: str, payload: Any) -> None:
         if kind in ("devices", "groups"):
             self.invalidate_rooms()
+            self.motion.sync()
             return
         if kind != "device_state":
             return
@@ -202,7 +220,7 @@ class AutomationEngine:
         if gesture is None:
             return
         ieee = payload["ieee"]
-        automation = device_owner(self.automations, ieee)
+        automation = device_owner(self.automations, ieee, type="room_knob")
         if automation is None:
             return
         self.handle_gesture(automation, ieee, gesture)
@@ -263,9 +281,11 @@ class AutomationEngine:
             self._schedule_save()
         if not plan.empty:
             self.hass.async_create_task(self._async_send(plan))
+            # Bewegungslicht im selben Raum: der Mensch hat das Licht übernommen
+            self.motion.handle_knob(room.area_id, plan.expected.on if plan.expected is not None else None)
         return plan
 
-    async def _async_send(self, plan: Plan) -> None:
+    async def _async_send(self, plan: Plan, context: Context | None = None) -> None:
         from homeassistant.components import mqtt  # noqa: PLC0415
 
         for topic, payload in plan.mqtt:
@@ -275,7 +295,7 @@ class AutomationEngine:
                 _LOGGER.exception("Haven-Automation: MQTT-Senden auf %s fehlgeschlagen", topic)
         for domain, service, data in plan.services:
             try:
-                await self.hass.services.async_call(domain, service, data, blocking=False)
+                await self.hass.services.async_call(domain, service, data, blocking=False, context=context)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Haven-Automation: %s.%s fehlgeschlagen", domain, service)
 
@@ -295,6 +315,8 @@ class AutomationEngine:
         automation = self.get(automation_id)
         if automation is None:
             raise Z2MError("not_found", f"Unbekannte Automation {automation_id}")
+        if automation.get("type") == "room_motion":
+            raise Z2MError("invalid_format", "Bewegungslicht testet man mit motion, clear oder takeover")
         room = self.room_targets().get(automation["room_area_id"])
         self._record(automation, gesture, room, None, "test")
         if room is None:

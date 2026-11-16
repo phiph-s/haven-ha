@@ -1,7 +1,8 @@
 """Haven-Automationen: Modell, Validierung, Normalisierung und Planung (ohne Home Assistant).
 
 Eine Automation ist ein Dokument ``{id, type, name, enabled, room_area_id, devices, options}``.
-Bisher gibt es nur den Typ ``room_knob``: Drehregler und Taster steuern das Licht eines Raums.
+Typen: ``room_knob`` (Drehregler und Taster steuern das Licht eines Raums) und
+``room_motion`` (Bewegungslicht, siehe ``motion.py``).
 
 Ablauf zur Laufzeit (``automations_runtime``):
 
@@ -27,7 +28,7 @@ from .commands import Z2MError
 
 # --- Konstanten -----------------------------------------------------------------
 
-AUTOMATION_TYPES = ("room_knob",)
+AUTOMATION_TYPES = ("room_knob", "room_motion")
 GESTURES = ("rotate", "single", "double", "hold")
 # Aktionen für Druck-Gesten (Drücken, Doppelt, Halten)
 PRESS_ACTIONS = ("none", "toggle", "next_scene", "scene", "off")
@@ -45,7 +46,7 @@ MAX_DEVICES = 32
 # Store ``.storage/haven.automations``
 STORE_KEY = "haven.automations"
 STORE_VERSION = 1
-STORE_MINOR_VERSION = 2
+STORE_MINOR_VERSION = 3
 
 DEFAULT_GESTURES: dict[str, dict[str, Any]] = {
     "rotate": {"action": "brightness"},
@@ -324,6 +325,12 @@ def normalize_options(options: Any) -> dict[str, Any]:
 def normalize_automation(doc: dict[str, Any]) -> dict[str, Any]:
     """Gespeicherte Form: Standardwerte ergänzt, Geräte ohne Duplikate."""
     devices = doc.get("devices") if isinstance(doc.get("devices"), list) else []
+    if doc.get("type") == "room_motion":
+        from .motion import normalize_motion_options  # noqa: PLC0415 - motion importiert dieses Modul
+
+        options = normalize_motion_options(doc.get("options"))
+    else:
+        options = normalize_options(doc.get("options"))
     return {
         **doc,
         "id": doc.get("id") or new_id(),
@@ -332,7 +339,7 @@ def normalize_automation(doc: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(doc.get("enabled", True)),
         "room_area_id": doc.get("room_area_id"),
         "devices": list(dict.fromkeys(d for d in devices if isinstance(d, str))),
-        "options": normalize_options(doc.get("options")),
+        "options": options,
     }
 
 
@@ -353,8 +360,9 @@ def validate_shape(doc: Any) -> list[str]:
     if not isinstance(doc.get("room_area_id"), str) or not doc["room_area_id"]:
         errors.append("room_area_id fehlt")
     devices = doc.get("devices")
+    motion = doc.get("type") == "room_motion"
     if not isinstance(devices, list) or not devices:
-        errors.append("Wähl mindestens einen Regler oder Taster")
+        errors.append("Wähl mindestens einen Melder" if motion else "Wähl mindestens einen Regler oder Taster")
     elif len(devices) > MAX_DEVICES:
         errors.append("Zu viele Geräte")
     elif not all(isinstance(d, str) and d for d in devices):
@@ -365,6 +373,10 @@ def validate_shape(doc: Any) -> list[str]:
     if not isinstance(opts, dict):
         errors.append("options muss ein Objekt sein")
         return errors
+    if motion:
+        from .motion import validate_motion_shape  # noqa: PLC0415
+
+        return errors + validate_motion_shape(doc)
     gestures = opts.get("gestures", {})
     if not isinstance(gestures, dict):
         errors.append("gestures muss ein Objekt sein")
@@ -399,9 +411,13 @@ def validate_shape(doc: Any) -> list[str]:
     return errors
 
 
-def device_owner(automations: list[dict[str, Any]], ieee: str, *, exclude_id: str | None = None) -> dict[str, Any] | None:
-    """Aktive Automation, die das Gerät schon steuert."""
+def device_owner(
+    automations: list[dict[str, Any]], ieee: str, *, exclude_id: str | None = None, type: str | None = None
+) -> dict[str, Any] | None:
+    """Aktive Automation, die das Gerät schon steuert (optional nur eines Typs)."""
     for a in automations:
+        if type is not None and a.get("type", "room_knob") != type:
+            continue
         if a.get("id") != exclude_id and a.get("enabled", True) and ieee in a.get("devices", []):
             return a
     return None
@@ -435,16 +451,18 @@ def validate_automation(
             raise Z2MError("not_found", f"Unbekanntes Zigbee-Gerät {unknown[0]}")
     if automation["enabled"]:
         for ieee in automation["devices"]:
-            owner = device_owner(existing, ieee, exclude_id=automation["id"])
+            owner = device_owner(existing, ieee, exclude_id=automation["id"], type=automation["type"])
             if owner is not None:
                 name = (known_devices or {}).get(ieee) or ieee
                 raise Z2MError(
-                    "device_taken", f"{name} steuert schon {owner.get('name') or 'eine andere Automation'}"
+                    "device_taken", f"{name} {'meldet schon für' if automation['type'] == 'room_motion' else 'steuert schon'} {owner.get('name') or 'eine andere Automation'}"
                 )
     return automation
 
 
-def default_name(room: RoomTarget | None, area_id: str) -> str:
+def default_name(room: RoomTarget | None, area_id: str, type: str = "room_knob") -> str:
+    if type == "room_motion":
+        return f"Bewegungslicht {room.name if room else area_id}"
     return f"Drehregler {room.name if room else area_id}"
 
 
@@ -637,7 +655,7 @@ def mqtt_payload(payload: dict[str, Any]) -> str:
 
 
 def empty_store() -> dict[str, Any]:
-    return {"automations": [], "runtime": {"last_scene": {}, "last_triggered": {}}}
+    return {"automations": [], "runtime": {"last_scene": {}, "last_triggered": {}, "motion": {}}}
 
 
 def migrate_store(old_major: int, old_minor: int, data: Any) -> dict[str, Any]:
@@ -645,7 +663,9 @@ def migrate_store(old_major: int, old_minor: int, data: Any) -> dict[str, Any]:
 
     - 1.1: ``{"automations": [...]}`` ohne ``runtime``, Optionen flach
       (``hold_action``, ``hold_scene``, ``step``), Szenen-Zähler unter ``scene_index``.
-    - 1.2 (aktuell): ``{"automations": [...], "runtime": {"last_scene": {room: id},
+    - 1.3 (aktuell): wie 1.2, dazu ``runtime.motion`` (``{id: MotionState}``, Besitzer und Zeitgeber der
+      Bewegungslichter) und Automationen vom Typ ``room_motion``. Die Migration von 1.2 ergänzt nur ``motion``.
+    - 1.2: ``{"automations": [...], "runtime": {"last_scene": {room: id},
       "last_triggered": {id: {at, action}}}}``, Gesten unter ``options.gestures``.
     Eine bloße Liste gilt als 1.1 ohne Hülle.
     """
@@ -675,6 +695,7 @@ def migrate_store(old_major: int, old_minor: int, data: Any) -> dict[str, Any]:
         "runtime": {
             "last_scene": dict(runtime.get("last_scene") or {}),
             "last_triggered": dict(runtime.get("last_triggered") or {}),
+            "motion": {k: v for k, v in (runtime.get("motion") or {}).items() if isinstance(v, dict)},
         },
     }
 
