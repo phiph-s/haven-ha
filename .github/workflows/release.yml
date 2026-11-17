@@ -28,7 +28,17 @@ jobs:
           cd custom_components/haven
           zip -r ../../haven.zip . -x "__pycache__/*" "*.pyc"
 
+      - name: Release-Text aus der Tag-Nachricht
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | sed '/^-----BEGIN PGP/,$d' > "$RUNNER_TEMP/notes.md"
+          if [ -s "$RUNNER_TEMP/notes.md" ]; then
+            echo "NOTES_FILE=$RUNNER_TEMP/notes.md" >> "$GITHUB_ENV"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           files: haven.zip
-          generate_release_notes: true
+          # Text aus dem annotierten Tag, ohne Text die Liste der Commits
+          body_path: ${{ env.NOTES_FILE }}
+          generate_release_notes: ${{ env.NOTES_FILE == '' }}
