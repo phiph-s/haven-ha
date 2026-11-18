@@ -2,8 +2,10 @@
 
 Die Logik liegt HA-frei in ``motion.py`` (Besitz-Automat ``step``). Hier passiert nur:
 
-- State-Abos auf die Melder-Entities (``binary_sensor`` je IEEE aus den ``ha_entities``) und auf
-  die Lichter des Raums (Gruppe und Lampen),
+- Melder: direkt aus den Z2M-Meldungen (``presence``/``occupancy``, über die Bridge wie bei den
+  Reglern). Die HA-Entities (``binary_sensor`` je IEEE) dienen nur noch der Anzeige und als
+  Rückfall beim Start, wenn Z2M noch nichts gemeldet hat,
+- State-Abos auf die Lichter des Raums (Gruppe und Lampen),
 - der Zeitgeber je Automation (``async_call_later``),
 - Befehle senden (MQTT auf die Raumgruppe, sonst HA-Dienste mit eigenem ``Context``),
 - Ereignis ``haven_automation_triggered`` und der Zustand im Store (``runtime.motion``).
@@ -66,6 +68,7 @@ class MotionRunner:
         self._timers: dict[str, Callable[[], None]] = {}
         self._resolved: dict[str, dict[str, Any]] = {}  # id -> {detectors, lux}
         self._own: deque[str] = deque(maxlen=64)
+        self._z2m: dict[str, dict[str, bool]] = {}  # id -> {ieee: aktiv} aus Z2M-Meldungen
         self._retry: Callable[[], None] | None = None
         self._retries = 0
 
@@ -121,10 +124,6 @@ class MotionRunner:
                         break
             self._resolved[aid] = {"detectors": detectors, "lux": lux_entity}
             unresolved = unresolved or len(detectors) < len(automation["devices"])
-            if detectors:
-                self._unsubs.append(
-                    async_track_state_change_event(self.hass, detectors, lambda e, aid=aid: self._on_detector(aid, e))
-                )
             room = rooms.get(automation["room_area_id"])
             if room is not None:
                 lights = [*room.lights, *([room.group_entity] if room.group_entity else [])]
@@ -142,7 +141,14 @@ class MotionRunner:
     def _restore(self, aid: str, automation: dict[str, Any], room: RoomTarget | None, detectors: list[str]) -> None:
         """Nach Neustart: Melderzustand lesen, Nachlauf neu ansetzen, Zeitgeber setzen."""
         state = self.states[aid]
-        state.occupied = any(mo.detector_active((s := self.hass.states.get(d)) and s.state) for d in detectors)
+        state.occupied = any(self._device_active(aid, ieee) for ieee in automation["devices"]) or any(
+            mo.detector_active((s := self.hass.states.get(d)) and s.state) for d in detectors
+        )
+        if room is not None and state.owner == "manual" and self.engine._room_state(room).on is False:  # noqa: SLF001
+            # Licht ist aus (z. B. während des Neustarts ausgeschaltet): niemandem mehr
+            state.owner, state.deadline, state.warn_at, state.warned, state.applied = "none", None, None, False, None
+            self.engine.runtime.setdefault("motion", {})[aid] = state.to_dict()
+            self.engine._schedule_save()  # noqa: SLF001
         if room is not None and state.owner == "motion" and not state.occupied:
             self._apply(automation, room, mo.MotionEvent("clear"), source="restore")
         else:
@@ -174,23 +180,37 @@ class MotionRunner:
             return None
         return automation, state
 
+    def _device_active(self, aid: str, ieee: str) -> bool:
+        """Letzter bekannter Melderzustand eines Geräts (Z2M), ``False`` wenn unbekannt."""
+        known = (self._z2m.get(aid) or {}).get(ieee)
+        if known is not None:
+            return known
+        bridge = self.engine.bridge
+        cached = bridge.state_cache.states.get(ieee) if bridge is not None else None
+        return bool(mo.detector_value(cached))
+
     @callback
-    def _on_detector(self, aid: str, event: Event) -> None:
-        ctx = self._context(aid)
-        new = event.data.get("new_state")
-        active = mo.detector_active(new.state if new else None)
-        if ctx is None or active is None:
+    def handle_device_state(self, ieee: str, values: dict[str, Any]) -> None:
+        """Z2M-Meldung eines Geräts: bei Melderwechsel ``motion`` bzw. ``clear`` an die Automationen."""
+        active = mo.detector_value(values)
+        if active is None:
             return
-        automation, _ = ctx
-        # Mehrere Melder: aktiv, solange einer aktiv ist
-        if not active:
-            others = [d for d in self._resolved.get(aid, {}).get("detectors", []) if d != event.data.get("entity_id")]
-            if any(mo.detector_active((s := self.hass.states.get(d)) and s.state) for d in others):
-                return
-        room = self.engine.room_targets().get(automation["room_area_id"])
-        if room is None:
-            return
-        self._apply(automation, room, mo.MotionEvent("motion" if active else "clear"), source="device")
+        for automation in self.automations():
+            aid = automation["id"]
+            if ieee not in automation["devices"] or self._context(aid) is None:
+                continue
+            seen = self._z2m.setdefault(aid, {})
+            changed = seen.get(ieee) is not active
+            seen[ieee] = active
+            # Z2M sendet bei jeder Meldung (z. B. Helligkeit) den ganzen Zustand: nur Wechsel zählen
+            if not changed:
+                continue
+            # Mehrere Melder: aktiv, solange einer aktiv ist
+            if not active and any(self._device_active(aid, d) for d in automation["devices"] if d != ieee):
+                continue
+            room = self.engine.room_targets().get(automation["room_area_id"])
+            if room is not None:
+                self._apply(automation, room, mo.MotionEvent("motion" if active else "clear"), source="device")
 
     @callback
     def _on_light(self, aid: str, event: Event) -> None:

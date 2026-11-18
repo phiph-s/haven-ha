@@ -361,6 +361,21 @@ def test_missed_off_event_restarts():
     assert kinds(cmds) == ["on", "motion_on"]
 
 
+def test_stale_manual_with_light_off_switches_on_again():
+    # „manuell“ gespeichert, das Aus-Ereignis ging verloren (z. B. HA-Neustart)
+    o, s, _ = _on()
+    s, _ = run(o, s, "knob", at(20, 0, 30), light_on=True)
+    assert s.owner == "manual"
+    assert mo.status(o, s, env(at(21)))["owner"] == "none"  # Anzeige: Licht ist aus
+    s, cmds = run(o, s, "motion", at(21), light_on=False)
+    assert kinds(cmds) == ["on", "motion_on"] and s.owner == "motion"
+    # Licht an: „manuell“ bleibt und der Melder schaltet nichts
+    s, _ = run(o, s, "knob", at(21, 0, 30), light_on=True)
+    s, cmds = run(o, s, "motion", at(21, 5), light_on=True)
+    assert cmds == [] and s.owner == "manual"
+    assert mo.status(o, s, env(at(21, 5), light_on=True))["owner"] == "manual"
+
+
 def test_status():
     o, s, _ = _on()
     st = mo.status(o, s, env(at(20), light_on=True))
@@ -368,7 +383,7 @@ def test_status():
     s, _ = run(o, s, "clear", at(20, 1))
     assert mo.status(o, s, env(at(20, 1)))["off_at"] == pytest.approx(s.deadline)
     s, _ = run(o, s, "knob", at(20, 1, 30), light_on=True)
-    assert mo.status(o, s, env(at(20, 2)))["phase"] == "manual"
+    assert mo.status(o, s, env(at(20, 2), light_on=True))["phase"] == "manual"
 
 
 def test_state_roundtrip_and_garbage():
@@ -505,3 +520,11 @@ def test_store_migration_1_2_to_1_3():
     assert new["runtime"]["motion"] == {"m1": {"owner": "manual"}}
     json.dumps(new)
     assert auto.empty_store()["runtime"]["motion"] == {}
+
+
+def test_detector_value_from_z2m():
+    assert mo.detector_value({"occupancy": True, "illuminance": 12}) is True
+    assert mo.detector_value({"presence": False, "occupancy": True}) is False
+    assert mo.detector_value({"illuminance": 12}) is None
+    assert mo.detector_value({"occupancy": "on"}) is None
+    assert mo.detector_value(None) is None

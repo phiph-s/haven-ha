@@ -390,8 +390,10 @@ def step(options: dict[str, Any], state: MotionState, event: MotionEvent, env: M
 
     if kind == "motion":
         s.occupied = True
-        if s.owner == "motion" and env.light_on is False and now > s.expect_until:
-            _release(s)  # Licht wurde ausgeschaltet, ohne dass wir es mitbekamen
+        if s.owner != "none" and env.light_on is False and now > s.expect_until:
+            # Licht ist aus, ohne dass wir es mitbekamen (z. B. Neustart, verlorenes Ereignis).
+            # „manuell“ gilt nur, solange das Licht an ist.
+            _release(s)
         if s.owner == "motion":
             if s.warned and s.applied:
                 cmds.append(Command("on", light=s.applied, transition=1.0))
@@ -499,6 +501,8 @@ def next_wake(s: MotionState) -> float | None:
 def status(options: dict[str, Any], s: MotionState, env: MotionEnv) -> dict[str, Any]:
     """Für die App: ``owner``, ``off_at`` (Unix-Zeit), ``inactive`` (Grund) und ``phase``."""
     inactive = None
+    if s.owner == "manual" and env.light_on is False and env.now.timestamp() > s.expect_until:
+        s = replace(s, owner="none", deadline=None)  # Anzeige: aus = niemand (siehe ``step``)
     if s.owner == "none":
         ok, reason = check_conditions(options, env, light_off=env.light_on is not True)
         inactive = None if ok else reason
@@ -597,6 +601,16 @@ def parse_lux(state: str | None) -> float | None:
         return float(state) if state not in (None, "", "unknown", "unavailable") else None
     except (TypeError, ValueError):
         return None
+
+
+def detector_value(values: Any) -> bool | None:
+    """Melderzustand aus einer Z2M-Meldung: ``presence`` vor ``occupancy``, sonst unbekannt."""
+    if not isinstance(values, dict):
+        return None
+    for key in ("presence", "occupancy"):
+        if isinstance(values.get(key), bool):
+            return values[key]
+    return None
 
 
 def detector_active(state: str | None) -> bool | None:

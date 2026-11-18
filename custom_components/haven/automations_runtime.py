@@ -216,6 +216,7 @@ class AutomationEngine:
             return
         if kind != "device_state":
             return
+        self.motion.handle_device_state(payload["ieee"], payload.get("values") or {})
         gesture = normalize_action(payload.get("values"))
         if gesture is None:
             return
