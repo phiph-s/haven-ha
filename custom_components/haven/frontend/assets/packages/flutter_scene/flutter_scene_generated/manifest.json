@@ -1,0 +1,62 @@
+{
+  "schema": 3,
+  "package": "flutter_scene",
+  "entries": [
+    {
+      "family": "material",
+      "id": "physical",
+      "file": "opengl_es/material.physical.a784038e.index.json",
+      "stamp": "dd49686183d893c5",
+      "target": "openglEs"
+    },
+    {
+      "family": "material",
+      "id": "physical",
+      "file": "opengl_es_vulkan/material.physical.5efdfc49.index.json",
+      "stamp": "fbe8e14f8d344e5a",
+      "target": "openglEs,vulkan"
+    },
+    {
+      "family": "material",
+      "id": "physical#shaderbundle",
+      "file": "opengl_es/material.physical.a784038e.shaderbundle",
+      "stamp": "dd49686183d893c5",
+      "target": "openglEs"
+    },
+    {
+      "family": "material",
+      "id": "physical#shaderbundle",
+      "file": "opengl_es_vulkan/material.physical.5efdfc49.shaderbundle",
+      "stamp": "fbe8e14f8d344e5a",
+      "target": "openglEs,vulkan"
+    },
+    {
+      "family": "material",
+      "id": "physical#sidecar",
+      "file": "opengl_es/material.physical.a784038e.fmat.json",
+      "stamp": "dd49686183d893c5",
+      "target": "openglEs"
+    },
+    {
+      "family": "material",
+      "id": "physical#sidecar",
+      "file": "opengl_es_vulkan/material.physical.5efdfc49.fmat.json",
+      "stamp": "fbe8e14f8d344e5a",
+      "target": "openglEs,vulkan"
+    },
+    {
+      "family": "shaderBundle",
+      "id": "base",
+      "file": "opengl_es/shaderbundle.base.212c5f8f.shaderbundle",
+      "stamp": "a2edaab6fe85d249",
+      "target": "openglEs"
+    },
+    {
+      "family": "shaderBundle",
+      "id": "base",
+      "file": "opengl_es_vulkan/shaderbundle.base.1808f1b7.shaderbundle",
+      "stamp": "e8767e4c550a5bd4",
+      "target": "openglEs,vulkan"
+    }
+  ]
+}
