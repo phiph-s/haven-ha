@@ -40,7 +40,7 @@ Alle Befehle: `{"id": N, "type": "...", ...}`, Antwort im HA-üblichen Format `{
          "device_count": 42, "group_count": 4, "devices_received": true, "groups_received": true,
          "last_seen_enabled": true, "availability_enabled": false}}
 ```
-(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1), `ghost_detection` (`last_seen`, `last_seen_source`, `availability`, `haven/zigbee/enable_last_seen`, ab 0.5.2), `scenes` (`haven/zigbee/scene_*`, `look` an den Szenen von `haven/zigbee/groups`, ab 0.6.0). `z2m.last_seen_enabled` ist `config.advanced.last_seen != "disable"` aus `bridge/info`, `z2m.availability_enabled` ist `config.availability` bzw. bei einem Objekt dessen `enabled` (Z2M 2.x; Objekt ohne `enabled` = an; Z2M: Standard aus; vor 0.6.4 galt jedes Objekt als an); beide `null`, solange `bridge/info` fehlt. `version` kommt aus `manifest.json`.
+(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1), `ghost_detection` (`last_seen`, `last_seen_source`, `availability`, `haven/zigbee/enable_last_seen`, ab 0.5.2), `scenes` (`haven/zigbee/scene_*`, `look` an den Szenen von `haven/zigbee/groups`, ab 0.6.0), `heating` (`haven/heating/*`, Heizungsregelung je Raum). `z2m.last_seen_enabled` ist `config.advanced.last_seen != "disable"` aus `bridge/info`, `z2m.availability_enabled` ist `config.availability` bzw. bei einem Objekt dessen `enabled` (Z2M 2.x; Objekt ohne `enabled` = an; Z2M: Standard aus; vor 0.6.4 galt jedes Objekt als an); beide `null`, solange `bridge/info` fehlt. `version` kommt aus `manifest.json`.
 
 ### `haven/rooms`
 Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gezählt werden nur Haupt-Entities (ohne `entity_category`, nicht deaktiviert, nicht versteckt).
@@ -261,7 +261,7 @@ Nach jedem erfolgreichen `haven/floorplan/set`, `haven/widgets/set` und `haven/p
 ```json
 {"event_type": "haven_data_updated", "data": {"kind": "floorplan", "updated_at": "2026-11-15T12:00:00Z"}}
 ```
-- `kind`: `floorplan`, `widgets`, `prefs` oder `automations` (nach `haven/automations/set|delete`).
+- `kind`: `floorplan`, `widgets`, `prefs`, `automations` (nach `haven/automations/set|delete`) oder `heating` (nach `haven/heating/set|delete`).
 - `updated_at`: nur wenn bekannt (aus dem Befehl, bei Grundriss und Prefs sonst aus dem Feld `updatedAt` des Dokuments), unverändert als Text oder Zahl. Sonst fehlt der Schlüssel.
 - Die App abonniert per `subscribe_events` mit `event_type: "haven_data_updated"`.
 - Einschränkung: HA erlaubt Nicht-Administratoren `subscribe_events` nur für Event-Typen aus der `SUBSCRIBE_ALLOWLIST` von HA. `haven_data_updated` steht nicht darin, das Abo funktioniert also nur mit einem Administrator-Konto (die App nutzt dessen Long-Lived-Token). Das stammt aus dem Wissen über den HA-Quellcode, nicht aus einem Test.
@@ -334,6 +334,36 @@ Melder (Z2M-Geräte mit `occupancy` oder `presence`) schalten das Licht eines Ra
 **Validierung:** Ein Melder darf nur in einer aktiven Bewegungslicht-Automation stecken (`device_taken`, „X meldet schon für Y“). Knob und Bewegungslicht im selben Raum sind erlaubt und verzahnt. Weitere Fehler: `invalid_format`, `not_found`, `no_lights`.
 
 **Ereignis** `haven_automation_triggered` mit `action` `motion_on`, `motion_extend`, `motion_off`, `takeover` oder `warn` und `state: {owner, phase, occupied, off_at, inactive, night, lux, detectors, lux_entity}`. `haven/automations/list` liefert dasselbe als `motion` je Automation. `phase`: `idle`, `motion`, `warn`, `manual`, `inactive` (`inactive`: `time`, `sun`, `lux`).
+
+## Heizungsregelung (Feature `heating`)
+Haven übernimmt, wofür man sonst Better Thermostat installiert: Die Heizkörperthermostate (TRV, Zigbee über Z2M) eines Raums laufen als Gruppe mit **einem** Ziel und regeln nach einem oder mehreren **Raumthermometern** statt nach ihrem Fühler am Heizkörper. Dazu kommen Fensterkontakte, eine Sommerpause nach der Außentemperatur und Betriebsarten des Raums. Logik HA-frei in `heating.py` (getestet in `tests/test_heating.py`), Laufzeit in `heating_runtime.py` (`tests/test_heating_runtime.py`, nachgebautes HA wie beim Bewegungslicht), Befehle in `heating_ws.py`.
+
+**Einstellungen je Raum** (`.storage/haven.heating`, `{"rooms": {area_id: config}, "state": {area_id: {...}}}`):
+```json
+{"area_id": "salon", "enabled": true, "trvs": ["0x00124b0000000030"],
+ "sensors": ["sensor.sensor_salon_temperature", "sensor.sensor_salon_fenster_temperature"],
+ "windows": ["binary_sensor.fenster_salon_contact"], "window_open_delay": 60, "window_close_delay": 120,
+ "calibration": "offset", "outdoor": {"entity": "weather.forecast_home", "threshold": 16.0},
+ "presets": {"comfort": 21.0, "eco": 18.0, "away": 16.0}, "lock_manual": false}
+```
+- `trvs`: 1 bis 8 Zigbee-Thermostate (IEEE), ein TRV gehört höchstens zu einem Raum (`device_taken`). `sensors`: 0 bis 8 `sensor.*`, Mittelwert der gültigen (nicht `unknown`/`unavailable`, plausibel, Meldung höchstens 4 h alt). Ohne gültigen Wert gilt das Mittel der TRV-Messungen, dann wird nichts korrigiert (die letzte Kalibrierung bleibt).
+- `calibration`: `offset` = `local_temperature_calibration` auf Raum − Rohmessung des TRV (Rohmessung = `local_temperature` − aktuelle Kalibrierung), gerundet auf den Schritt des Geräts, in dessen Grenzen. Geschrieben ab 0,3 °C Abweichung, höchstens alle 10 min, und nach einer Änderung erst, wenn das TRV eine neue Messung geschickt hat (spätestens nach 30 min). Ob ein Gerät die kalibrierte oder die rohe Temperatur meldet, erkennt Haven an der ersten Änderung ab 0,8 °C (springt die Messung mit, gilt sie als kalibriert; bis dahin wird das angenommen). TRVs ohne beschreibbare Kalibrierung fallen auf `target` zurück. `target` = Sollwert am TRV = Ziel + (TRV-Messung − Raum), auf den Schritt gerundet, automatische Anpassungen höchstens alle 10 min (sofort bei Änderungen am Ziel oder ab 1,5 °C). `none` = keine Korrektur. Wechselt man weg von `offset`, setzt Haven seine Kalibrierung auf 0 zurück, ebenso beim Entfernen der Regelung oder eines TRV.
+- `windows`: `binary_sensor.*` (`on` = offen, `unavailable` zählt als zu). Pause nach `window_open_delay` (0 bis 1800 s) offen, weiter nach `window_close_delay` (0 bis 3600 s) zu.
+- `outdoor`: `sensor.*` oder `weather.*` (Attribut `temperature`), geglättet (EMA, τ = 4 h, Neustart nach 12 h Lücke). Sommerpause ab `threshold` (5 bis 30 °C), Ende 1 °C darunter.
+- `presets`: Temperaturen der Betriebsarten Komfort, Eco, Abwesend (5 bis 30 °C). `lock_manual`: Änderungen am TRV zurücksetzen statt übernehmen.
+
+**Regelung:** Betriebsart des Raums `heat` (Manuell, Ziel `target`), `comfort`, `eco`, `away`, `off`. Die TRVs laufen dabei im Gerätemodus `preset: on` (bzw. `system_mode: heat` bei Geräten ohne passendes `preset`). Aus, Fenster und Sommer schalten `preset`/`system_mode` auf `off`, Geräte ohne Aus bekommen ihren kleinsten Sollwert. Dreht jemand am TRV (Sollwert ändert sich, nicht auf eigenen Befehl, Gerät im Modus `on`), wird das das neue Ziel für den ganzen Raum (bei `target` ohne die Verschiebung); eine Modustaste am Gerät (`eco`, `comfort`, `antifrost`, `off`) schaltet die Betriebsart des Raums, Haven setzt das Gerät danach wieder auf `on` mit der Temperatur des Raums. Unbestätigte Befehle gehen nach 5 min erneut raus. Auswertung bei jeder TRV-Meldung, bei Änderungen der Sensoren und Kontakte, zu den Fenster-Verzögerungen und alle 2 min. Befehle: `<base>/<name>/set`. Der TRV-eigene Wochenplan gilt nicht, solange Haven regelt.
+
+| Befehl | Payload | Antwort |
+|---|---|---|
+| `haven/heating/list` | – | `{rooms: [{config, status}], running}` |
+| `haven/heating/set` (Admin) | `{config: {...}}` | `{ok, config, status}` |
+| `haven/heating/delete` (Admin) | `{area_id}` | `{ok}` |
+| `haven/heating/control` (Admin) | `{area_id, target?, mode?}` (Ziel ohne `mode` schaltet auf `heat`) | `{ok, status}` |
+
+`status`: `{area_id, enabled, mode, target, effective_target, room_temperature, room_source ("sensors"|"trv"|null), sensors: [{entity_id, value}], reason ("off"|"window"|"summer"|null), heating, window: {open, paused, pause_at, resume_at, contacts: [{entity_id, open}]}, outdoor: {entity_id, value, current, threshold, summer}|null, trvs: [{ieee, name, available, local_temperature, setpoint, calibration, mode, heating, valve, method, correction, desired_setpoint, desired_calibration, pending}], running}`. Bei jeder Änderung feuert `haven_heating_updated` `{area_id, status}`, nach `set`/`delete` `haven_data_updated` mit `kind: "heating"`. Fehler: `invalid_format`, `not_found`, `device_taken`.
+
+Nicht enthalten (gegenüber Better Thermostat): lernende Regler (PID, TPI, MPC, „AI time based“), Ventil direkt stellen, Ventilpflege, Kühlgeräte, Feuchte, Türen mit eigenen Zeiten, eigener Wochenplan.
 
 ## Seitenleisten-Eintrag „Haven“ (Web-App in Home Assistant)
 Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, meldet Haven beim Laden des Config Entries einen Eintrag „Haven“ in der Seitenleiste an. Die App läuft dort direkt in Home Assistant, ohne Token und ohne Onboarding, im Hell- oder Dunkelmodus von HA.

@@ -96,6 +96,11 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
 
     async_register_automation_commands(hass)
 
+    # Heizungsregelung je Raum (haven/heating/*)
+    from .heating_ws import async_register_heating_commands  # noqa: PLC0415
+
+    async_register_heating_commands(hass)
+
 
 def _get_entry(hass: HomeAssistant) -> HavenConfigEntry | None:
     """Der (einzige) geladene Haven-Entry oder None."""

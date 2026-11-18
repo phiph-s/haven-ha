@@ -58,6 +58,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HavenConfigEntry) -> boo
     from .automations_runtime import async_setup_automations  # noqa: PLC0415
 
     entry.async_on_unload(await async_setup_automations(hass, bridge))
+    # Heizungsregelung je Raum (Raumthermometer, Fenster, Sommer) hört ebenfalls auf die Bridge
+    from .heating_runtime import async_setup_heating  # noqa: PLC0415
+
+    entry.async_on_unload(await async_setup_heating(hass, bridge))
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     # Seitenleisten-Eintrag „Haven“ (Web-Build der App), nur wenn mitgeliefert
     await _async_setup_panel(hass, entry)
