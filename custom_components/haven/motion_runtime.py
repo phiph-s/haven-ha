@@ -12,6 +12,10 @@ Die Logik liegt HA-frei in ``motion.py`` (Besitz-Automat ``step``). Hier passier
 
 Eigene Änderungen erkennt der Automat am Erwartungsfenster und am Kontext: Dienstaufrufe der Engine
 tragen einen eigenen ``Context``, ein ``state_changed`` mit fremdem ``context.user_id`` gilt als manuell.
+
+Alles, was HA hier zurückruft (Zeitgeber, State-Abos), ist mit ``@callback`` markiert. Eine nackte
+Funktion führt HA im Thread-Pool aus. Dort lehnt HA ``async_create_task`` und ``bus.async_fire`` ab:
+Der Automat hatte dann schon auf „niemand“ geschaltet, aber das Aus kam nie beim Licht an.
 """
 
 from __future__ import annotations
@@ -129,12 +133,12 @@ class MotionRunner:
                 lights = [*room.lights, *([room.group_entity] if room.group_entity else [])]
                 if lights:
                     self._unsubs.append(
-                        async_track_state_change_event(self.hass, lights, lambda e, aid=aid: self._on_light(aid, e))
+                        async_track_state_change_event(self.hass, lights, callback(lambda e, aid=aid: self._on_light(aid, e)))
                     )
             self._restore(aid, automation, room, detectors)
         if unresolved and self._retries < _MAX_RETRIES:
             self._retries += 1
-            self._retry = async_call_later(self.hass, _RETRY_SECONDS, lambda _now: self.sync())
+            self._retry = async_call_later(self.hass, _RETRY_SECONDS, callback(lambda _now: self.sync()))
         elif not unresolved:
             self._retries = 0
 
@@ -312,7 +316,9 @@ class MotionRunner:
         if wake is None:
             return
         delay = max(0.0, wake - time.time())
-        self._timers[aid] = async_call_later(self.hass, delay + 0.05, lambda now, aid=aid: self._on_timer(aid, now))
+        self._timers[aid] = async_call_later(
+            self.hass, delay + 0.05, callback(lambda now, aid=aid: self._on_timer(aid, now))
+        )
 
     def _fire(self, automation: dict[str, Any], room: RoomTarget, action: str, source: str) -> None:
         at = datetime.now(timezone.utc).isoformat(timespec="seconds")
