@@ -62,6 +62,9 @@ def test_info_flags():
     assert lastseen.last_seen_enabled({}) is None
     assert lastseen.availability_enabled({"config": {"availability": {"enabled": True}}}) is True
     assert lastseen.availability_enabled({"config": {"availability": True}}) is True
+    # Z2M 2.x: Objekt mit enabled false = aus
+    assert lastseen.availability_enabled({"config": {"availability": {"enabled": False, "active": {"timeout": 10}}}}) is False
+    assert lastseen.availability_enabled({"config": {"availability": {"active": {"timeout": 10}}}}) is True
     assert lastseen.availability_enabled({"config": {}}) is False
     assert lastseen.availability_enabled({}) is None
 
@@ -95,6 +98,7 @@ def test_bridge_sources_and_availability():
 
     bridge.networkmap = {"nodes": [{"ieeeAddr": "0x1", "lastSeen": MS}], "links": [], "timestamp": "x"}
     assert bridge.device_summary("0x1")["last_seen_source"] == "networkmap"
+    assert bridge.device_summary("0x1")["networkmap_at"] == "x"
 
     bridge.handle_device_message("zigbee2mqtt/Lampe", json.dumps({"last_seen": "2026-05-01T00:00:00Z"}))
     summary = bridge.device_summary("0x1")

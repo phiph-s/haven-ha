@@ -134,4 +134,7 @@ def availability_enabled(info: dict[str, Any]) -> bool | None:
     if not isinstance(config, dict):
         return None
     value = config.get("availability")
+    if isinstance(value, dict):
+        # Z2M 2.x: {"enabled": false, "active": {...}, "passive": {...}}; 1.x: Objekt ohne enabled = an
+        return bool(value.get("enabled", True))
     return bool(value) if value is not None else False

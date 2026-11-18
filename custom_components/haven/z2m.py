@@ -490,6 +490,8 @@ class Z2MBridge:
             "capabilities": classified.get("capabilities", []),
             "last_seen": last_seen,
             "last_seen_source": last_seen_source,
+            # Zeitpunkt der Netzmessung, wenn last_seen nur aus ihr stammt (Schnappschuss, ab 0.6.4)
+            "networkmap_at": (self.networkmap or {}).get("timestamp") if last_seen_source == "networkmap" else None,
             "availability": self.availability.get(ieee),
         }
 
