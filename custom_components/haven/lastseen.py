@@ -2,11 +2,13 @@
 
 Quellen in dieser Reihenfolge:
 
-1. ``last_seen`` im Gerätezustand (Z2M-Option ``advanced.last_seen``), ISO-Text oder Millisekunden.
-2. ``lastSeen`` (ms) aus der zuletzt gemessenen Netzkarte.
+- ``last_seen`` im Gerätezustand (Z2M-Option ``advanced.last_seen``), ISO-Text oder Millisekunden,
+- der Empfang einer echten Gerätemeldung (Quelle ``message``),
+- ``lastSeen`` (ms) aus der zuletzt gemessenen Netzkarte (nur ein Schnappschuss der Messung).
 
-Der Empfangszeitpunkt beliebiger MQTT-Meldungen zählt bewusst nicht: Z2M veröffentlicht beim Start
-die gespeicherten Zustände aller Geräte, das ließe Geister wieder frisch aussehen.
+``last_seen`` von Z2M gilt, wenn vorhanden. Sonst der jüngere aus Empfang und Netzkarte. Beim Empfang zählen keine gespeicherten (retained) Meldungen und
+nichts in der ersten Minute nach dem Start von Z2M: Z2M veröffentlicht dann die gespeicherten
+Zustände aller Geräte, das ließe Geister wieder frisch aussehen.
 """
 
 from __future__ import annotations
@@ -16,6 +18,10 @@ from typing import Any
 
 SOURCE_Z2M = "z2m"
 SOURCE_NETWORKMAP = "networkmap"
+SOURCE_MESSAGE = "message"
+
+# So lange nach dem Start von Z2M zählen Gerätemeldungen nicht als Lebenszeichen
+STARTUP_QUIET_SECONDS = 60.0
 
 # Werte unter dieser Grenze (Jahr 2001 in ms) gelten als Sekunden seit 1970
 _MS_THRESHOLD = 1_000_000_000_000
@@ -71,15 +77,20 @@ def networkmap_last_seen(nodes: Any) -> dict[str, datetime]:
 
 
 def resolve_last_seen(
-    state_value: Any, networkmap_value: datetime | None
+    state_value: Any, networkmap_value: datetime | None, received: datetime | None = None
 ) -> tuple[str | None, str | None]:
-    """``(last_seen als ISO, Quelle)``: erst Z2M-Zustand, dann Netzkarte, sonst ``(None, None)``."""
+    """``(last_seen als ISO, Quelle)``, sonst ``(None, None)``.
+
+    ``last_seen`` aus Z2M gilt, wenn vorhanden (die Zeit von Z2M selbst). Sonst der jüngere Zeitpunkt
+    aus Empfang und Netzkarte, bei Gleichstand der Empfang.
+    """
     seen = parse_last_seen(state_value)
-    source = SOURCE_Z2M
-    if seen is None:
-        seen, source = networkmap_value, SOURCE_NETWORKMAP
-    if seen is None:
+    if seen is not None:
+        return seen.isoformat(timespec="seconds"), SOURCE_Z2M
+    candidates = [(t, s) for t, s in ((received, SOURCE_MESSAGE), (networkmap_value, SOURCE_NETWORKMAP)) if t is not None]
+    if not candidates:
         return None, None
+    seen, source = max(candidates, key=lambda c: c[0])  # max behält bei Gleichstand den ersten
     return seen.isoformat(timespec="seconds"), source
 
 

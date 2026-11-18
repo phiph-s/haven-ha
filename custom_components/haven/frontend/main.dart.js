@@ -30869,15 +30869,16 @@ bwj(a){var s,r=a.a,q=B.h.bh(r,864e8)
 if(q>=1)return q===1?"1 Tag":""+q+" Tagen"
 s=B.h.bh(r,36e8)
 return""+(s<1?1:s)+" Std"},
-bnf(a,b,c,d){var s,r,q,p,o=c==null?null:d.d8(c)
-if(b){if(o==null||o.a<=1728e8)return null
-return new A.a0k(B.rp,c,o.a>=18144e8,"Seit "+A.bwj(o)+" keine Meldung, Batterie pr\xfcfen")}s=o==null
+bnf(a,b,c,d){var s,r,q,p,o=null,n=c==null?o:d.d8(c)
+if(b){if(n==null||n.a<=1728e8)return o
+return new A.a0k(B.rp,c,n.a>=18144e8,"Seit "+A.bwj(n)+" keine Meldung, Batterie pr\xfcfen")}if(a==="online")return o
+s=n==null
 r=!s
-q=r&&o.a>864e8
-if(a==="offline")p=!r||o.a>36e8
+q=r&&n.a>864e8
+if(a==="offline")p=!r||n.a>36e8
 else p=!1
-if(!q&&!p)return null
-return new A.a0k(B.a_h,c,!0,s?"Nicht erreichbar":"Seit "+A.bwj(o)+" nicht erreichbar")},
+if(!q&&!p)return o
+return new A.a0k(B.a_h,c,!0,s?"Nicht erreichbar":"Seit "+A.bwj(n)+" nicht erreichbar")},
 bR7(a){var s,r
 if(a==null)return"zuletzt gesehen: unbekannt"
 s=a.pB()
@@ -31669,6 +31670,7 @@ case 1:return A.v(q,r)}})
 return A.w($async$anu,r)},
 bRO(a){var s,r
 switch(a.y){case"z2m":return"laut Zigbee2MQTT"
+case"message":return"letzte Meldung des Ger\xe4ts"
 case"networkmap":s=a.z
 r=s==null?null:s.pB()
 if(r==null)return"laut Netzmessung"

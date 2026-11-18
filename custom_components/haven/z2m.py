@@ -15,6 +15,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from .commands import (
@@ -32,6 +33,7 @@ from .commands import (
 from .const import MAX_EVENTS
 from .exposes import classify
 from .lastseen import (
+    STARTUP_QUIET_SECONDS,
     availability_enabled,
     last_seen_enabled,
     networkmap_last_seen,
@@ -78,6 +80,10 @@ class Z2MBridge:
         self.tracker = TransactionTracker()
         self.state_cache = StateCache(self.base_topic)
         self.availability: dict[str, str] = {}  # ieee -> "online" | "offline"
+        # Verfügbarkeit nach Friendly-Name: kommt (retained) oft vor bridge/devices an
+        self._availability_by_name: dict[str, str] = {}
+        self.received: dict[str, datetime] = {}  # ieee -> Empfang der letzten echten Gerätemeldung
+        self._quiet_until = 0.0  # monotonic: bis dahin zählt Empfang nicht (Start von Z2M)
         self.networkmap: dict[str, Any] | None = None  # {nodes, links, timestamp}
         self.networkmap_job = NetworkmapJob()
         self._networkmap_task: asyncio.Task[None] | None = None
@@ -119,7 +125,7 @@ class Z2MBridge:
         # Gerätezustände: ``<base>/+``; Namen mit ``/`` kommen in _async_sync_slash_subs dazu.
         @callback
         def _on_device_message(msg: Any) -> None:
-            self.handle_device_message(msg.topic, msg.payload)
+            self.handle_device_message(msg.topic, msg.payload, retained=bool(getattr(msg, "retain", False)))
 
         @callback
         def _on_availability(msg: Any) -> None:
@@ -218,6 +224,13 @@ class Z2MBridge:
         self.state_cache.set_names({d.get("friendly_name"): i for i, d in self.devices.items() if d.get("friendly_name")})
         for ieee in [i for i in self.availability if i not in self.devices]:
             del self.availability[ieee]
+        for ieee in [i for i in self.received if i not in self.devices]:
+            del self.received[ieee]
+        # Verfügbarkeit, die vor der Geräteliste kam, jetzt zuordnen
+        for name, state in self._availability_by_name.items():
+            ieee = self.state_cache.ieee_for(name)
+            if ieee is not None and self.availability.get(ieee) != state:
+                self.availability[ieee] = state
         if self.hass is not None:
             self.hass.async_create_task(self._async_sync_slash_subs())
         self._notify("devices", None)
@@ -242,6 +255,9 @@ class Z2MBridge:
         state = data.get("state") if isinstance(data, dict) else (data if isinstance(data, str) else None)
         if state is None and isinstance(payload, str):
             state = payload.strip()
+        if state == "online" and self.state != "online":
+            # Z2M startet (oder HA hat die Bridge gerade erst gesehen): gespeicherte Zustände folgen
+            self._quiet_until = time.monotonic() + STARTUP_QUIET_SECONDS
         self.state = state
         self._notify("state", None)
 
@@ -251,19 +267,30 @@ class Z2MBridge:
             self.events.append(data)
             self._notify("event", data)
 
-    def handle_device_message(self, topic: str, payload: str | bytes) -> None:
-        """``<base>/<friendly_name>``: merkt den Zustand und meldet ``device_state``."""
+    def handle_device_message(
+        self, topic: str, payload: str | bytes, *, retained: bool = False, now: datetime | None = None
+    ) -> None:
+        """``<base>/<friendly_name>``: merkt den Zustand und meldet ``device_state``.
+
+        Eine echte Meldung (nicht retained, nicht in der Startphase von Z2M) gilt als Lebenszeichen.
+        """
         result = self.state_cache.ingest(topic, payload)
         if result is not None:
             ieee, values = result
+            if not retained and time.monotonic() >= self._quiet_until:
+                self.received[ieee] = now or datetime.now(timezone.utc)
             self._notify("device_state", {"ieee": ieee, "values": values})
 
     def handle_availability_message(self, topic: str, payload: str | bytes) -> None:
         """``<base>/<friendly_name>/availability``: merkt ``online``/``offline`` je Gerät."""
-        ieee = self.state_cache.availability_ieee(topic)
+        name = self.state_cache.availability_name(topic)
         state = parse_availability(payload)
-        if ieee is None or state is None:
+        if name is None or state is None:
             return
+        self._availability_by_name[name] = state
+        ieee = self.state_cache.ieee_for(name)
+        if ieee is None:
+            return  # Geräteliste fehlt noch (oder Gruppe): wird in handle_devices zugeordnet
         if self.availability.get(ieee) != state:
             self.availability[ieee] = state
             self._notify("availability", {"ieee": ieee, "availability": state})
@@ -438,7 +465,7 @@ class Z2MBridge:
         """``(last_seen ISO, Quelle)`` je IEEE, siehe :mod:`lastseen`."""
         state_value = self.state_cache.states.get(ieee, {}).get("last_seen")
         nodes = (self.networkmap or {}).get("nodes")
-        return resolve_last_seen(state_value, networkmap_last_seen(nodes).get(ieee))
+        return resolve_last_seen(state_value, networkmap_last_seen(nodes).get(ieee), self.received.get(ieee))
 
     def device_summary(self, ieee: str) -> dict[str, Any] | None:
         device = self.devices.get(ieee)

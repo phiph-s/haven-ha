@@ -62,9 +62,18 @@ class StateCache:
         """Friendly-Name -> exaktes Verfügbarkeits-Topic, für Namen mit ``/``."""
         return {n: f"{self.base}/{n}/availability" for n in sorted(self._names) if "/" in n}
 
-    def availability_ieee(self, topic: str) -> str | None:
-        """IEEE zu einem Verfügbarkeits-Topic, ``None`` bei Gruppen, Bridge oder Fremdem."""
+    def availability_name(self, topic: str) -> str | None:
+        """Friendly-Name aus einem Verfügbarkeits-Topic (auch noch unbekannte), ``None`` bei Fremdem."""
         prefix, suffix = self.base + "/", "/availability"
         if not (topic.startswith(prefix) and topic.endswith(suffix)):
             return None
-        return self._names.get(topic[len(prefix) : -len(suffix)])
+        name = topic[len(prefix) : -len(suffix)]
+        return None if not name or name == "bridge" or name.startswith("bridge/") else name
+
+    def availability_ieee(self, topic: str) -> str | None:
+        """IEEE zu einem Verfügbarkeits-Topic, ``None`` bei Gruppen, Bridge oder Fremdem."""
+        name = self.availability_name(topic)
+        return self._names.get(name) if name is not None else None
+
+    def ieee_for(self, name: str) -> str | None:
+        return self._names.get(name)
