@@ -84,6 +84,13 @@ def validate_prefs(prefs: Any) -> list[str]:
     und IEEE-Adressen gesperrter Geräte („immer an“). Unbekannte Schlüssel sind erlaubt."""
     if not isinstance(prefs, dict):
         return ["prefs muss ein JSON-Objekt sein"]
+    weather = prefs.get("weather")
+    if weather is not None and (
+        not isinstance(weather, dict)
+        or any(k not in ("entity", "temperature", "snow_depth") for k in weather)
+        or not all(isinstance(v, str) and "." in v for v in weather.values())
+    ):
+        return ["weather: entity, temperature und snow_depth müssen Entity-IDs sein"]
     locked = prefs.get("locked", [])
     if not isinstance(locked, list) or len(locked) > MAX_DOC_ITEMS:
         return ["locked muss eine Liste sein"]

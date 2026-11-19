@@ -170,3 +170,13 @@ def test_networkmap_cache_roundtrip():
     assert appdata.deserialize_networkmap_cache({"networkmap": {"nodes": "x", "links": [], "timestamp": "t"}}) is None
     assert appdata.deserialize_networkmap_cache({"networkmap": {"nodes": [], "links": []}}) is None
     assert appdata.serialize_networkmap_cache(None) == {"networkmap": None}
+
+
+def test_prefs_weather_sources():
+    ok = {"weather": {"entity": "weather.forecast_home", "temperature": "sensor.aussen_temperature"}}
+    assert appdata.validate_prefs(ok) == []
+    assert appdata.normalize_prefs(ok)["weather"] == ok["weather"]
+    assert appdata.validate_prefs({"weather": "x"}) != []
+    assert appdata.validate_prefs({"weather": {"entity": 3}}) != []
+    assert appdata.validate_prefs({"weather": {"wind": "sensor.x"}}) != []
+
