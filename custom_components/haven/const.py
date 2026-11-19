@@ -5,7 +5,10 @@ from __future__ import annotations
 DOMAIN = "haven"
 
 # Fähigkeiten für haven/info (die App prüft darauf statt auf die Version)
-FEATURES = ("light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "automations", "networkmap_background", "ghost_detection", "scenes", "heating")
+FEATURES = ("light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "automations", "networkmap_background", "ghost_detection", "scenes", "heating", "render")
+
+# Plattformen des Entries (Bilder der Wohnung, siehe image.py)
+PLATFORMS = ("image",)
 
 # HA-Event nach erfolgreichem floorplan/set, widgets/set und prefs/set
 EVENT_DATA_UPDATED = "haven_data_updated"

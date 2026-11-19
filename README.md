@@ -9,6 +9,7 @@ Die Integration ist die Gegenstelle der Flutter-App [Haven](https://github.com/p
 - Liest die Zigbee2MQTT-Geräte und -Gruppen (`bridge/devices`, `bridge/groups`) und klassifiziert die Exposes für die App (Hauptbedienung, Einstellungen, Diagnose, deutsche Beschriftungen).
 - Schreibt zurück: Geräte steuern, umbenennen, Bereich setzen (mit Gruppenabgleich), Anlernen, Interview, Entfernen, Netzwerkkarte.
 - Speichert Grundriss, Widgets und App-Einstellungen (Lichter, die die App ausblendet) zentral in `.storage`, damit mehrere Geräte denselben Stand sehen.
+- Zeigt die Wohnung als Bild im aktuellen Licht (Image-Entities `image.haven_karte_*`, je Perspektive und Design) für Widgets und Displays. Die App liefert dafür nach Kartenänderungen Lichtebenen, Home Assistant setzt sie ohne GPU zusammen (braucht numpy und Pillow).
 
 ## Voraussetzungen
 - Home Assistant 2025.1 oder neuer mit eingerichteter **MQTT-Integration**.
@@ -40,7 +41,7 @@ Alle Befehle: `{"id": N, "type": "...", ...}`, Antwort im HA-üblichen Format `{
          "device_count": 42, "group_count": 4, "devices_received": true, "groups_received": true,
          "last_seen_enabled": true, "availability_enabled": false}}
 ```
-(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1), `ghost_detection` (`last_seen`, `last_seen_source`, `availability`, `haven/zigbee/enable_last_seen`, ab 0.5.2), `scenes` (`haven/zigbee/scene_*`, `look` an den Szenen von `haven/zigbee/groups`, ab 0.6.0), `heating` (`haven/heating/*`, Heizungsregelung je Raum). `z2m.last_seen_enabled` ist `config.advanced.last_seen != "disable"` aus `bridge/info`, `z2m.availability_enabled` ist `config.availability` bzw. bei einem Objekt dessen `enabled` (Z2M 2.x; Objekt ohne `enabled` = an; Z2M: Standard aus; vor 0.6.4 galt jedes Objekt als an); beide `null`, solange `bridge/info` fehlt. `version` kommt aus `manifest.json`.
+(`z2m` ist `null`, wenn der Entry nicht geladen ist. `channel` und `pan_id` kommen aus `bridge/info` → `network`, sonst `null`.) `api_version` steigt nur bei inkompatiblen Änderungen. Neues kommt additiv und steht in `features` (ab 0.2.0, fehlt bei 0.1.0): `light_groups` (`light_groups`, `group_entity` in `haven/rooms`), `room_devices` (`devices` in `haven/rooms`), `prefs` (`haven/prefs/*`), `data_events` (Event `haven_data_updated`, ab 0.3.0, auch `layout`/`updated_at` bei Widgets und Grundriss), `networkmap_cache` (Cache übersteht einen HA-Neustart, ab 0.3.0), `networkmap_background` (Netzmessung im Hintergrund, ab 0.5.1), `ghost_detection` (`last_seen`, `last_seen_source`, `availability`, `haven/zigbee/enable_last_seen`, ab 0.5.2), `scenes` (`haven/zigbee/scene_*`, `look` an den Szenen von `haven/zigbee/groups`, ab 0.6.0), `heating` (`haven/heating/*`, Heizungsregelung je Raum), `render` (`haven/render/*`, Bilder der Wohnung). `z2m.last_seen_enabled` ist `config.advanced.last_seen != "disable"` aus `bridge/info`, `z2m.availability_enabled` ist `config.availability` bzw. bei einem Objekt dessen `enabled` (Z2M 2.x; Objekt ohne `enabled` = an; Z2M: Standard aus; vor 0.6.4 galt jedes Objekt als an); beide `null`, solange `bridge/info` fehlt. `version` kommt aus `manifest.json`.
 
 ### `haven/rooms`
 Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gezählt werden nur Haupt-Entities (ohne `entity_category`, nicht deaktiviert, nicht versteckt).
@@ -256,12 +257,25 @@ Speicher: `.storage/haven.prefs` (`{"prefs": {...}}`). Ein Dokument für App-Ein
 → {"ok": true, "prefs": {"excluded_lights": ["light.salon"]}}
 ```
 
+### Bilder der Wohnung: `haven/render/*` (Feature `render`)
+Die App rendert nach Kartenänderungen je Perspektive (Übersicht 2D, Übersicht 3D, je Raum) und Design (`light`, `dark`) einen **Bildsatz**: `base.png` (alle Lampen aus), `room_<raum>.png` (Ausschnitt „Raum an, ohne Licht“: Möbellinien blenden in hellen Räumen aus), `lamp_<entity>.png` (Ausschnitt mit nur dieser Lampe in gedämpftem Weiß) und `meta.json` (Größe, Ausschnitte, Belichtung `exposure`, Helligkeit der Ebenen `gain`). Licht ist additiv, deshalb setzt `render_compose.py` jeden Lichtzustand ohne GPU zusammen: Grundbild mit den Raumausschnitten heller Räume, dazu je Lampe `farbe · helligkeit / gain · (T⁻¹(ebene) − T⁻¹(raum)) / exposure` in linearem Licht, am Ende das Tone-Mapping T (PBR Neutral wie in der App). Helligkeit und Farbe kommen aus dem HA-Zustand wie in der App (`brightness`, `rgb_color`, sonst `color_temp_kelvin`, sonst 2700 K; mindestens 5 %).
+
+Upload in Stücken über die WebSocket-Verbindung (Admin): `begin` verwirft einen laufenden Upload, `chunk` hängt an (`offset` = bisherige Dateigröße, `data` Base64, höchstens 1 MiB je Stück), `commit` prüft jeden Satz und ersetzt den Bestand in `.storage/haven_render/sets` vollständig. Satz- und Dateinamen: Satz `[A-Za-z0-9_-][A-Za-z0-9_.-]*`, Dateien `meta.json`, `base.png`, `room_*.png`, `lamp_*.png`. `key` ist der Render-Schlüssel der App (Hash aus Plan, Perspektiven, Format): Am `key` aus `status` sieht jedes Gerät, ob die Bilder zum aktuellen Plan passen.
+```json
+{"type": "haven/render/status"} → {"available": true, "key": "1-…", "updated_at": "…", "sets": {"uebersicht_3d_dark": {"view": "uebersicht_3d", "name": "Übersicht 3D", "room": null, "theme": "dark", "width": 1024, "height": 768, "lamps": ["light.salon"]}}}
+{"type": "haven/render/begin", "key": "1-…"} → {"upload": "…", "max_chunk": 1048576}
+{"type": "haven/render/chunk", "upload": "…", "path": "uebersicht_3d_dark/base.png", "offset": 0, "data": "iVBOR…"} → {"size": 262144}
+{"type": "haven/render/commit", "upload": "…"} → {"ok": true, "sets": ["uebersicht_3d_dark"]}
+{"type": "haven/render/abort"} → {"ok": true}
+```
+Je Satz entsteht eine Image-Entity `image.haven_karte_<name>_<hell|dunkel>` (Attribute `view`, `room`, `theme`, `width`, `height`). Das Bild entsteht beim Abruf (`entity_picture`) im Executor, mit Cache je Lichtzustand. Schaltet eine Lampe des Satzes, ändert sich `image_last_updated` (höchstens einmal je Sekunde), Clients laden dann neu. `available: false`: numpy oder Pillow fehlen, `begin` antwortet dann `not_supported`.
+
 ## Event `haven_data_updated` (ab 0.3.0)
 Nach jedem erfolgreichen `haven/floorplan/set`, `haven/widgets/set` und `haven/prefs/set` feuert Haven auf dem HA-Event-Bus `haven_data_updated`, damit andere Geräte neu laden können.
 ```json
 {"event_type": "haven_data_updated", "data": {"kind": "floorplan", "updated_at": "2026-11-15T12:00:00Z"}}
 ```
-- `kind`: `floorplan`, `widgets`, `prefs`, `automations` (nach `haven/automations/set|delete`) oder `heating` (nach `haven/heating/set|delete`).
+- `kind`: `floorplan`, `widgets`, `prefs`, `automations` (nach `haven/automations/set|delete`), `heating` (nach `haven/heating/set|delete`) oder `render` (nach `haven/render/commit`).
 - `updated_at`: nur wenn bekannt (aus dem Befehl, bei Grundriss und Prefs sonst aus dem Feld `updatedAt` des Dokuments), unverändert als Text oder Zahl. Sonst fehlt der Schlüssel.
 - Die App abonniert per `subscribe_events` mit `event_type: "haven_data_updated"`.
 - Einschränkung: HA erlaubt Nicht-Administratoren `subscribe_events` nur für Event-Typen aus der `SUBSCRIBE_ALLOWLIST` von HA. `haven_data_updated` steht nicht darin, das Abo funktioniert also nur mit einem Administrator-Konto (die App nutzt dessen Long-Lived-Token). Das stammt aus dem Wissen über den HA-Quellcode, nicht aus einem Test.

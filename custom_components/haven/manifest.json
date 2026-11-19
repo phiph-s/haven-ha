@@ -15,7 +15,10 @@
   "integration_type": "service",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/phiph-s/haven-ha/issues",
-  "requirements": [],
+  "requirements": [
+    "numpy>=1.26",
+    "Pillow>=10.0"
+  ],
   "single_config_entry": true,
-  "version": "0.6.21"
+  "version": "0.6.22"
 }

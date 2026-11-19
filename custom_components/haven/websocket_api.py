@@ -103,6 +103,11 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
 
     async_register_heating_commands(hass)
 
+    # Bilder der Wohnung für Widgets und Displays (haven/render/*)
+    from .render_ws import async_register_render_commands  # noqa: PLC0415
+
+    async_register_render_commands(hass)
+
 
 def _get_entry(hass: HomeAssistant) -> HavenConfigEntry | None:
     """Der (einzige) geladene Haven-Entry oder None."""

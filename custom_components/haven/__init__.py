@@ -11,7 +11,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC, DOMAIN, EVENT_NETWORKMAP_UPDATED
+from .const import CONF_BASE_TOPIC, DEFAULT_BASE_TOPIC, DOMAIN, EVENT_NETWORKMAP_UPDATED, PLATFORMS
 from .storage import get_storage
 from .websocket_api import async_register_websocket_commands
 from .z2m import Z2MBridge
@@ -63,6 +63,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HavenConfigEntry) -> boo
 
     entry.async_on_unload(await async_setup_heating(hass, bridge))
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    # Bilder der Wohnung (Lichtebenen der App) als Image-Entities
+    await hass.config_entries.async_forward_entry_setups(entry, list(PLATFORMS))
     # Seitenleisten-Eintrag „Haven“ (Web-Build der App), nur wenn mitgeliefert
     await _async_setup_panel(hass, entry)
     return True
@@ -85,7 +87,7 @@ async def _async_setup_panel(hass: HomeAssistant, entry: HavenConfigEntry) -> No
 
 async def async_unload_entry(hass: HomeAssistant, entry: HavenConfigEntry) -> bool:
     """Entlädt den Entry. Abos werden über async_on_unload beendet."""
-    return True
+    return await hass.config_entries.async_unload_platforms(entry, list(PLATFORMS))
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: HavenConfigEntry) -> None:
