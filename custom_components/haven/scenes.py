@@ -53,6 +53,11 @@ def _scene(group: dict[str, Any], scene_id: int) -> dict[str, Any]:
     raise Z2MError("not_found", f"Die Szene {scene_id} gibt es in dieser Gruppe nicht")
 
 
+def find_scene(group: dict[str, Any], scene_id: int) -> dict[str, Any]:
+    """``{id, name}`` der Szene oder :class:`Z2MError` ``not_found``."""
+    return _scene(group, scene_id)
+
+
 def _name_owner(group: dict[str, Any], name: str) -> dict[str, Any] | None:
     key = name.casefold()
     for s in group_scenes(group):
@@ -161,7 +166,7 @@ def validate_look(look: Any) -> dict[str, Any]:
 
 
 def prune_looks(looks: dict[str, Any], groups: list[dict[str, Any]]) -> dict[str, Any]:
-    """Entfernt Looks von Szenen, die es nicht mehr gibt (auch in Z2M gelöscht)."""
+    """Entfernt Looks (auch Soll und Messungen, gleiche Schlüssel) von Szenen, die es nicht mehr gibt."""
     present = {
         scene_key(group["id"], s["id"])
         for group in groups

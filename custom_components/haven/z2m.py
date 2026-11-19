@@ -320,6 +320,14 @@ class Z2MBridge:
         except Exception as err:  # noqa: BLE001
             raise Z2MError("mqtt_error", f"MQTT-Senden fehlgeschlagen: {err}") from err
 
+    async def async_publish_get(self, friendly_name: str, values: dict[str, Any]) -> None:
+        """``<base>/<friendly_name>/get``: Z2M liest die Werte am Gerät und meldet sie neu."""
+        self._check_online()
+        try:
+            await self._async_publish(f"{self.base_topic}/{friendly_name}/get", json.dumps(values))
+        except Exception as err:  # noqa: BLE001
+            raise Z2MError("mqtt_error", f"MQTT-Senden fehlgeschlagen: {err}") from err
+
     async def async_wait_groups(
         self, predicate: Callable[[list[dict[str, Any]]], bool], timeout: float
     ) -> bool:

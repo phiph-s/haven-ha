@@ -19,6 +19,8 @@ from .appdata import (
 from .const import DOMAIN, STORAGE_VERSION
 
 _KEY = f"{DOMAIN}_storage"
+# Teile von haven.scenes: Looks, Soll und letzte Messung je Szene
+_SCENE_PARTS = ("looks", "targets", "checks")
 
 
 class HavenStorage:
@@ -30,7 +32,7 @@ class HavenStorage:
         self._prefs = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.prefs")
         self._networkmap = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.networkmap")
         self._scenes = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.scenes")
-        self._scene_looks: dict[str, Any] | None = None
+        self._scene_doc: dict[str, dict[str, Any]] | None = None
 
     async def async_get_plan_doc(self) -> dict[str, Any]:
         """``{"plan": {...}|None, "updated_at": ...|None}``."""
@@ -79,21 +81,51 @@ class HavenStorage:
     async def async_set_prefs(self, prefs: dict[str, Any]) -> None:
         await self._prefs.async_save({"prefs": prefs})
 
+    async def _async_scene_doc(self) -> dict[str, dict[str, Any]]:
+        """``{looks, targets, checks}``, je ``{"<group_id>:<scene_id>": ...}`` (einmal geladen)."""
+        if self._scene_doc is None:
+            data = await self._scenes.async_load()
+            doc: dict[str, dict[str, Any]] = {}
+            for part in _SCENE_PARTS:
+                value = data.get(part) if isinstance(data, dict) else None
+                doc[part] = dict(value) if isinstance(value, dict) else {}
+            self._scene_doc = doc
+        return self._scene_doc
+
+    async def _async_set_scene_part(self, part: str, values: dict[str, Any]) -> None:
+        doc = await self._async_scene_doc()
+        doc[part] = dict(values)
+        await self._scenes.async_save({p: doc[p] for p in _SCENE_PARTS})
+
     async def async_get_scene_looks(self) -> dict[str, Any]:
         """Looks der Szenen, ``{"<group_id>:<scene_id>": {colors, brightness, kelvin, stored_at}}``."""
-        if self._scene_looks is None:
-            data = await self._scenes.async_load()
-            looks = data.get("looks") if isinstance(data, dict) else None
-            self._scene_looks = dict(looks) if isinstance(looks, dict) else {}
-        return self._scene_looks
+        return (await self._async_scene_doc())["looks"]
 
     def scene_looks_cached(self) -> dict[str, Any]:
         """Ohne Laden (für synchrone Callbacks), leer bis zum ersten Laden."""
-        return self._scene_looks or {}
+        return (self._scene_doc or {}).get("looks", {})
 
     async def async_set_scene_looks(self, looks: dict[str, Any]) -> None:
-        self._scene_looks = dict(looks)
-        await self._scenes.async_save({"looks": self._scene_looks})
+        await self._async_set_scene_part("looks", looks)
+
+    async def async_get_scene_targets(self) -> dict[str, Any]:
+        """Soll je Szene (siehe ``scenesync``): ``{members, ieees, stored_at, source}``."""
+        return (await self._async_scene_doc())["targets"]
+
+    async def async_set_scene_targets(self, targets: dict[str, Any]) -> None:
+        await self._async_set_scene_part("targets", targets)
+
+    async def async_get_scene_checks(self) -> dict[str, Any]:
+        """Letzte Messung je Szene (Ergebnis von ``scene_check``)."""
+        return (await self._async_scene_doc())["checks"]
+
+    async def async_set_scene_checks(self, checks: dict[str, Any]) -> None:
+        await self._async_set_scene_part("checks", checks)
+
+    def scene_sync_cached(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """``(targets, checks)`` ohne Laden, leer bis zum ersten Laden."""
+        doc = self._scene_doc or {}
+        return doc.get("targets", {}), doc.get("checks", {})
 
 
 def get_storage(hass: HomeAssistant) -> HavenStorage:
