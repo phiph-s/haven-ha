@@ -217,6 +217,30 @@ def test_store_upload_commit_and_status(tmp_path):
     assert not (tmp_path / "render" / "upload").exists()
 
 
+def test_store_read_files_in_pieces(tmp_path):
+    _make_set(tmp_path / "src")
+    store = rs.RenderStore(tmp_path / "render")
+    up = store.begin("k")
+    _upload_set(store, up, "raum_dark", tmp_path / "src")
+    store.commit(up)
+    want = (tmp_path / "src" / "base.png").read_bytes()
+    got, off = b"", 0
+    while True:
+        part, size = store.read("raum_dark", "base.png", off, 100)
+        assert size == len(want)
+        if not part:
+            break
+        got += part
+        off += len(part)
+    assert got == want
+    # Nur Dateien eines Satzes, nichts außerhalb
+    for name, file in [("..", "base.png"), ("raum_dark", "../index.json"), ("raum_dark", "x.txt"), ("fehlt", "base.png")]:
+        with pytest.raises(rs.RenderStoreError):
+            store.read(name, file)
+    with pytest.raises(rs.RenderStoreError):
+        store.read("raum_dark", "base.png", -1)
+
+
 def test_store_rejects_bad_uploads(tmp_path):
     _make_set(tmp_path / "src")
     store = rs.RenderStore(tmp_path / "render")

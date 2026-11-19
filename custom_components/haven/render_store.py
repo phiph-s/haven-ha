@@ -70,6 +70,22 @@ class RenderStore:
             "sets": idx.get("sets", {}),
         }
 
+    def read(self, name: str, file: str, offset: int = 0, length: int = 512 * 1024) -> tuple[bytes, int]:
+        """Stück ``length`` von Datei ``file`` im Satz ``name`` ab ``offset``; mit Gesamtgröße."""
+        if not isinstance(name, str) or not NAME_RE.match(name):
+            raise RenderStoreError(f"Ungültiger Satz: {name!r}")
+        if not isinstance(file, str) or not FILE_RE.match(file):
+            raise RenderStoreError(f"Ungültige Datei: {file!r}")
+        if not isinstance(offset, int) or offset < 0 or not isinstance(length, int) or length <= 0:
+            raise RenderStoreError("Ungültiger Ausschnitt")
+        path = self.sets_dir / name / file
+        if not path.is_file():
+            raise RenderStoreError(f"{name}/{file} gibt es nicht")
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            f.seek(min(offset, size))
+            return f.read(length), size
+
     # --- Upload -----------------------------------------------------------------------
 
     def begin(self, key: str) -> str:

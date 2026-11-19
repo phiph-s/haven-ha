@@ -26,7 +26,14 @@ MAX_CHUNK = 1024 * 1024
 
 @callback
 def async_register_render_commands(hass: HomeAssistant) -> None:
-    for command in (ws_render_status, ws_render_begin, ws_render_chunk, ws_render_commit, ws_render_abort):
+    for command in (
+        ws_render_status,
+        ws_render_file,
+        ws_render_begin,
+        ws_render_chunk,
+        ws_render_commit,
+        ws_render_abort,
+    ):
         websocket_api.async_register_command(hass, command)
 
 
@@ -42,6 +49,37 @@ async def ws_render_status(
     runtime = get_render(hass)
     status = await hass.async_add_executor_job(runtime.store.status)
     connection.send_result(msg["id"], {"available": render_available(), **status})
+
+
+# Höchstens so viele Bytes je gelesenem Stück (vor Base64)
+MAX_READ = 512 * 1024
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/render/file",
+        vol.Required("set"): str,
+        vol.Required("name"): str,
+        vol.Optional("offset", default=0): vol.All(int, vol.Range(min=0)),
+    }
+)
+@websocket_api.async_response
+async def ws_render_file(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Datei eines Bildsatzes lesen (Stück für Stück): für Bilder in der App, z. B. Raumkacheln."""
+    runtime = get_render(hass)
+    try:
+        data, size = await hass.async_add_executor_job(
+            runtime.store.read, msg["set"], msg["name"], msg["offset"], MAX_READ
+        )
+    except (RenderStoreError, OSError) as err:
+        _fail(connection, msg["id"], err)
+        return
+    connection.send_result(
+        msg["id"],
+        {"size": size, "offset": msg["offset"], "data": base64.b64encode(data).decode("ascii")},
+    )
 
 
 @websocket_api.require_admin
