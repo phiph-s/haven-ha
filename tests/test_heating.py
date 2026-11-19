@@ -32,6 +32,13 @@ TRV602Z_EXPOSES = [
     {"type": "numeric", "name": "position", "property": "position", "access": 1},
 ]
 
+# Dazu Komfort-Temperatur und Ventilverhalten (wie am echten Gerät)
+TRV602Z_FULL = TRV602Z_EXPOSES + [
+    {"type": "numeric", "name": "comfort_temperature", "property": "comfort_temperature", "access": 3,
+     "value_min": 5, "value_max": 35},
+    {"type": "enum", "name": "hysteresis", "property": "hysteresis", "access": 3, "values": ["comfort", "eco"]},
+]
+
 # Generisches Thermostat ohne Kalibrierung, Modus über system_mode
 GENERIC_EXPOSES = [
     {
@@ -49,7 +56,7 @@ def opts(**kw):
     return ht.normalize_options({"area_id": "salon", "trvs": [A], "sensors": ["sensor.salon_temperature"], **kw})
 
 
-def trv(local=None, setpoint=None, calibration=0.0, mode="on", exposes=TRV602Z_EXPOSES, available=True, heating=None):
+def trv(local=None, setpoint=None, calibration=0.0, mode="comfort", exposes=TRV602Z_EXPOSES, available=True, heating=None):
     caps = ht.trv_caps(exposes)
     values = {"local_temperature": local, caps.setpoint: setpoint, "preset": mode, "system_mode": mode}
     if caps.calibration:
@@ -83,8 +90,27 @@ def test_caps_trv602z():
     assert caps.setpoint == "current_heating_setpoint"
     assert (caps.min, caps.max, caps.step) == (5, 35, 0.5)
     assert caps.calibration == "local_temperature_calibration" and caps.cal_step == 0.1
-    # system_mode ist beim TRV602Z nur lesbar: Modus über preset
-    assert (caps.mode_prop, caps.on_value, caps.off_value) == ("preset", "on", "off")
+    # system_mode ist beim TRV602Z nur lesbar: Modus über preset. Nie „on“ (Ventil dauerhaft offen),
+    # sondern Komfort; „on“ und „auto“ (Wochenplan) heißen: das Gerät steuert selbst.
+    assert (caps.mode_prop, caps.on_value, caps.off_value) == ("preset", "comfort", "off")
+    assert caps.release_values == ("auto", "on") and caps.boost_values == ("on",)
+    assert caps.comfort_temp is None and caps.hysteresis is None
+
+
+def test_caps_trv602z_full():
+    caps = ht.trv_caps(TRV602Z_FULL)
+    assert caps.comfort_temp == "comfort_temperature" and caps.hysteresis == "hysteresis"
+
+
+def test_caps_prefer_manual_and_system_mode_over_comfort():
+    manual = [{"type": "enum", "property": "preset", "access": 3, "values": ["auto", "manual", "on", "off"]}]
+    caps = ht.trv_caps(manual)
+    assert (caps.mode_prop, caps.on_value) == ("preset", "manual")
+    assert caps.release_values == ("auto", "on")
+    both = GENERIC_EXPOSES + [{"type": "enum", "property": "preset", "access": 3, "values": ["comfort", "on"]}]
+    assert (ht.trv_caps(both).mode_prop, ht.trv_caps(both).on_value) == ("system_mode", "heat")
+    only_on = [{"type": "enum", "property": "preset", "access": 3, "values": ["on", "off"]}]
+    assert ht.trv_caps(only_on).mode_prop is None
 
 
 def test_caps_generic_system_mode():
@@ -198,13 +224,106 @@ def test_offset_deadband_interval_and_settle():
     # neue Messung mit Kalibrierung (20,0): passt, nichts zu tun
     st, commands, _ = run(o, st, inputs(now=T0 + 800, trvs={A: trv(20.0, 21.0, calibration=-4.0)}))
     assert commands == {} and st.trvs[A].cal_changed_at is None
-    # Raum kühlt ab, TRV merkt es nicht: neu kalibrieren (letztes Senden ist 15 min her)
-    st, commands, _ = run(o, st, inputs(now=T0 + 900, trvs={A: trv(20.0, 21.0, calibration=-4.0)}, sensors={"s": 19.0}))
-    assert commands == {A: {"local_temperature_calibration": -5.0}}
-    # gleich danach noch kälter: erst nach 10 min wieder
-    st, commands, _ = run(o, st, inputs(now=T0 + 950, trvs={A: trv(20.0, 21.0, calibration=-4.0)}, sensors={"s": 18.0}))
+    # Raum kühlt dauerhaft ab, TRV merkt es nicht: gedämpft nachführen, je Schritt höchstens 0,5
+    now = T0 + 800
+    for _ in range(4):
+        now += 900
+        st, commands, _ = run(o, st, inputs(now=now, trvs={A: trv(20.0, 21.0, calibration=-4.0)}, sensors={"s": 18.0}))
+    assert commands == {A: {"local_temperature_calibration": -4.5}}
+    # gleich danach: erst nach 10 min wieder
+    st, commands, _ = run(o, st, inputs(now=now + 50, trvs={A: trv(20.0, 21.0, calibration=-4.5)}, sensors={"s": 18.0}))
     assert commands == {}
-    assert ht.desired(o, st, inputs(trvs={A: trv(20.0, 21.0, calibration=-4.0)}, sensors={"s": 18.0}))[A].calibration == -6.0
+
+
+def test_calibration_is_smoothed_and_holds_while_valve_switches():
+    o = opts()
+    st, commands, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: trv(22.0, 21.0, calibration=0.0)}))
+    assert commands[A] == {"local_temperature_calibration": -2.0}
+    st, _, _ = run(o, st, inputs(now=T0 + 60, trvs={A: trv(20.0, 21.0, calibration=-2.0)}))
+    # Kurzer Ausreißer am Heizkörper (Ventil geht auf): die Glättung folgt kaum
+    hot = trv(23.0, 21.0, calibration=-2.0)
+    hot.reading.valve = 100
+    st, _, _ = run(o, st, inputs(now=T0 + 700, trvs={A: trv(20.0, 21.0, calibration=-2.0)}))
+    st.trvs[A].seen_valve = 0
+    st, commands, _ = run(o, st, inputs(now=T0 + 760, trvs={A: hot}))
+    assert st.trvs[A].valve_changed_at == T0 + 760
+    # Ventil hat gerade umgeschaltet: nicht nachkalibrieren
+    assert commands == {}
+    assert -2.0 > st.trvs[A].corr_ema > -3.0
+
+
+def test_device_open_valve_releases_trv_and_returns_after_a_while():
+    o = opts(calibration="none")
+    st, _, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: trv(20.0, 21.0)}))
+    # Jemand stellt am Gerät „on“ (Ventil offen): Haven gibt frei statt zurückzustellen
+    st, commands, events = run(o, st, inputs(now=T0 + 100, trvs={A: trv(20.0, 21.0, mode="on")}))
+    assert events == ["released:on"] and commands == {}
+    assert st.mode == "heat" and st.target == 21.0
+    s = ht.status(o, st, inputs(now=T0 + 100, trvs={A: trv(20.0, 21.0, mode="on")}))
+    assert s["released"] is True and s["trvs"][0]["released_mode"] == "on"
+    assert s["trvs"][0]["release_until"] == T0 + 100 + ht.BOOST_RETURN
+    assert ht.next_wake(o, st) == T0 + 100 + ht.BOOST_RETURN
+    # Sollwert am Gerät ändert sich: keine Übernahme, solange freigegeben
+    st, commands, events = run(o, st, inputs(now=T0 + 200, trvs={A: trv(20.0, 30.0, mode="on")}))
+    assert events == [] and commands == {} and st.target == 21.0
+    # Nach BOOST_RETURN übernimmt Haven wieder
+    later = T0 + 100 + ht.BOOST_RETURN
+    st, commands, events = run(o, st, inputs(now=later, trvs={A: trv(20.0, 30.0, mode="on")}))
+    assert events == ["resume_boost"]
+    assert commands == {A: {"preset": "comfort", "current_heating_setpoint": 21.0}}
+
+
+def test_device_schedule_releases_until_app_takes_over():
+    o = opts()
+    st, _, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: trv(24.0, 21.0, calibration=0.0)}))
+    st, commands, events = run(o, st, inputs(now=T0 + 100, trvs={A: trv(24.0, 21.0, calibration=-4.0, mode="auto")}))
+    assert events == ["released:auto"] and st.trvs[A].release_until is None
+    assert "preset" not in commands.get(A, {}) and "current_heating_setpoint" not in commands.get(A, {})
+    # Kalibrierung läuft weiter (Wochenplan regelt dann nach dem Raum)
+    assert ht.desired(o, st, inputs(now=T0 + 100, trvs={A: trv(24.0, 21.0, calibration=-4.0, mode="auto")}))[A].calibration == -4.0
+    # Wochenplan ändert den Sollwert: keine Übernahme
+    st, _, events = run(o, st, inputs(now=T0 + 3000, trvs={A: trv(20.0, 15.0, calibration=-4.0, mode="auto")}))
+    assert events == [] and st.target == 21.0
+    # „Wieder regeln“ in der App
+    st = ht.control(st, now=T0 + 3100)
+    assert st.trvs[A].released_at is None
+    _, commands, _ = run(o, st, inputs(now=T0 + 3100, trvs={A: trv(20.0, 15.0, calibration=-4.0, mode="auto")}))
+    assert commands[A]["preset"] == "comfort" and commands[A]["current_heating_setpoint"] == 21.0
+
+
+def test_released_without_calibration_resets_it():
+    o = opts(calibrate_released=False)
+    st, _, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: trv(24.0, 21.0, calibration=0.0)}))
+    st, commands, _ = run(o, st, inputs(now=T0 + 100, trvs={A: trv(20.0, 21.0, calibration=-4.0, mode="auto")}))
+    assert commands == {A: {"local_temperature_calibration": 0.0}}
+
+
+def test_device_back_to_comfort_ends_release_and_sets_room_mode():
+    o = opts(calibration="none")
+    st, _, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: trv(20.0, 21.0)}))
+    st, _, _ = run(o, st, inputs(now=T0 + 100, trvs={A: trv(20.0, 21.0, mode="auto")}))
+    st, _, events = run(o, st, inputs(now=T0 + 200, trvs={A: trv(20.0, 21.0, mode="eco")}))
+    assert events == ["resume_device", "manual_mode:eco"] and st.trvs[A].released_at is None
+
+
+def test_lock_manual_never_releases():
+    o = opts(calibration="none", lock_manual=True)
+    st, _, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: trv(20.0, 21.0)}))
+    st, commands, events = run(o, st, inputs(now=T0 + 400, trvs={A: trv(20.0, 21.0, mode="on")}))
+    assert events == [] and commands == {A: {"preset": "comfort"}}
+
+
+def test_comfort_temperature_and_hysteresis_follow():
+    o = opts(calibration="none")
+    caps = ht.trv_caps(TRV602Z_FULL)
+    values = {"local_temperature": 20.0, "current_heating_setpoint": 21.0, "preset": "comfort",
+              "comfort_temperature": 20.0, "hysteresis": "eco"}
+    t = ht.TrvInput(caps, ht.trv_reading(values, caps), "TRV")
+    st, commands, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: t}))
+    assert commands == {A: {"comfort_temperature": 21.0, "hysteresis": "comfort"}}
+    # nicht bei jeder Meldung erneut
+    _, commands, _ = run(o, st, inputs(now=T0 + 60, trvs={A: t}))
+    assert commands == {}
 
 
 def test_detects_whether_reported_temperature_includes_calibration():
@@ -303,10 +422,18 @@ def test_presets_and_off():
     assert commands == {A: {"preset": "off"}}
 
 
-def test_device_in_schedule_mode_is_put_to_manual():
+def test_device_in_schedule_mode_is_taken_over_at_setup():
     o = opts(calibration="none")
     _, commands, _ = run(o, ht.HeatingState(target=21.0), inputs(trvs={A: trv(20.0, 21.0, mode="auto")}))
-    assert commands == {A: {"preset": "on"}}
+    assert commands == {A: {"preset": "comfort"}}
+
+
+def test_old_open_valve_preset_is_replaced():
+    # Frühere Versionen haben „on“ gesendet: das Gerät steht noch so, ohne dass es jemand gestellt hat
+    o = opts(calibration="none")
+    st = ht.HeatingState(target=21.0, trvs={A: ht.TrvMemo(seen_mode="on", seen_setpoint=21.0, sent_mode="on")})
+    st, commands, events = run(o, st, inputs(trvs={A: trv(20.0, 21.0, mode="on")}))
+    assert events == [] and commands == {A: {"preset": "comfort"}}
 
 
 def test_off_without_off_value_uses_minimum():
@@ -342,7 +469,7 @@ def test_window_pause_after_delay_and_resume():
     st, commands, _ = run(o, st, inputs(now=T0 + 100, trvs={A: trv(20.0, 21.0, mode="off")}, windows={"binary_sensor.fenster": False}))
     assert commands == {} and ht.next_wake(o, st) == T0 + 220
     st, commands, events = run(o, st, inputs(now=T0 + 220, trvs={A: trv(20.0, 21.0, mode="off")}, windows={"binary_sensor.fenster": False}))
-    assert events == ["window_resume"] and commands == {A: {"preset": "on"}}
+    assert events == ["window_resume"] and commands == {A: {"preset": "comfort"}}
 
 
 def test_short_window_opening_is_ignored():
@@ -429,8 +556,8 @@ def test_preset_button_on_trv_switches_room_mode():
     # Taste am TRV: Gerät geht auf seine eigene Eco-Temperatur (hier 19)
     st, commands, events = run(o, st, inputs(now=T0 + 100, trvs={A: trv(20.0, 19.0, mode="eco")}))
     assert st.mode == "eco" and events == ["manual_mode:eco"]
-    # Haven setzt das Gerät zurück auf Manuell mit der Eco-Temperatur des Raums
-    assert commands == {A: {"preset": "on", "current_heating_setpoint": 18.0}}
+    # Haven setzt das Gerät zurück auf Komfort mit der Eco-Temperatur des Raums
+    assert commands == {A: {"preset": "comfort", "current_heating_setpoint": 18.0}}
 
 
 def test_lock_manual_reverts():

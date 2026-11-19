@@ -248,6 +248,8 @@ class HeatingRunner:
         out["running"] = self.bridge is not None
         window = out["window"]
         window["pause_at"], window["resume_at"] = _iso(window["pause_at"]), _iso(window["resume_at"])
+        for trv in out["trvs"]:
+            trv["release_until"] = _iso(trv["release_until"])
         return out
 
     def list_public(self) -> list[dict[str, Any]]:
@@ -299,11 +301,14 @@ class HeatingRunner:
                 continue
             self.hass.async_create_task(self._async_send(device.get("friendly_name") or ieee, {caps.calibration: 0}))
 
-    async def async_control(self, area: str, *, target: Any = None, mode: Any = None) -> dict[str, Any]:
+    async def async_control(
+        self, area: str, *, target: Any = None, mode: Any = None, resume: bool = False
+    ) -> dict[str, Any]:
+        """Ziel/Betriebsart aus der App; ``resume`` übernimmt nur freigegebene TRVs wieder."""
         if area not in self.configs:
             raise Z2MError("not_found", f"Für {area} ist keine Heizungsregelung eingerichtet")
-        if target is None and mode is None:
-            raise Z2MError("invalid_format", "target oder mode fehlt")
+        if target is None and mode is None and not resume:
+            raise Z2MError("invalid_format", "target, mode oder resume fehlt")
         state = self.states.get(area) or ht.HeatingState()
         self.states[area] = ht.control(state, target=target, mode=mode, now=time.time())
         self._data["state"][area] = self.states[area].to_dict()

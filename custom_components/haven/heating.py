@@ -13,6 +13,18 @@ Korrektur (``calibration``):
             Für Geräte ohne Kalibrierung.
 ``none``    Keine Korrektur, nur Gruppe, Fenster, Sommer und Betriebsarten.
 
+Die Korrektur folgt gedämpft: Raum und TRV-Messung werden geglättet (``CAL_TAU``), je Schritt ändert sich die
+Kalibrierung höchstens um ``CAL_MAX_STEP``, und kurz nachdem das Ventil umgeschaltet hat (der Fühler am
+Heizkörper wird warm oder kühlt ab) wird nicht nachgeführt.
+
+Regelmodus am Gerät: ``manual`` (Preset), sonst ``system_mode: heat``, sonst ``comfort`` (Preset). Nie ``on``:
+das heißt bei Tuya-Ventilen „Ventil dauerhaft offen“.
+
+Bedienung am Gerät: Eine neue Temperatur gilt für den ganzen Raum, ein Preset Komfort/Eco/Frostschutz/Aus wird
+zur Betriebsart des Raums. Stellt jemand das Gerät auf ``on`` (Ventil offen) oder ``auto`` (eigener Wochenplan),
+gibt Haven dieses TRV frei und schickt ihm weder Modus noch Sollwert, bis jemand in der App wieder übernimmt
+(``on`` holt Haven nach ``BOOST_RETURN`` von selbst zurück). Die Kalibrierung läuft auf Wunsch weiter.
+
 Ablauf je Auswertung (Zeitgeber, TRV-Meldung, Sensor-Änderung)::
 
     state, events = observe(options, state, inputs)   # Fenster, Sommer, Änderungen am Gerät übernehmen
@@ -61,13 +73,21 @@ OUTDOOR_TAU = 4 * 3600  # Glättung der Außentemperatur
 OUTDOOR_HYSTERESIS = 1.0
 OUTDOOR_RESET = 12 * 3600  # nach so langer Lücke neu anfangen
 EPS = 0.05
+CAL_TAU = 900  # Glättung der Abweichung Raum − TRV (s)
+CAL_MAX_STEP = 0.5  # höchstens so viel Kalibrierung je Schritt
+VALVE_JUMP = 25  # Ventil ändert sich um so viele Prozentpunkte: umgeschaltet
+VALVE_SETTLE = 600  # danach so lange nicht nachkalibrieren
+BOOST_RETURN = 45 * 60  # Ventil offen am Gerät: danach übernimmt Haven wieder
+
+# Preset-Werte, mit denen das Gerät selbst steuert (Haven gibt es frei) bzw. die nur kurz gelten
+_SELF_CONTROL = ("on", "boost", "auto", "schedule", "program", "programming")
+_BOOST = ("on", "boost")
 
 _ENTITY = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 # Z2M-Werte des ``preset`` bzw. ``system_mode`` -> Betriebsart des Raums (Änderung am Gerät)
 _PRESET_TO_MODE = {
     "off": "off",
-    "on": "heat",
     "manual": "heat",
     "heat": "heat",
     "comfort": "comfort",
@@ -93,6 +113,7 @@ def default_options() -> dict[str, Any]:
         "outdoor": None,  # {"entity": "sensor.x" | "weather.x", "threshold": 16.0}
         "presets": dict(DEFAULT_PRESETS),
         "lock_manual": False,
+        "calibrate_released": True,  # freigegebene TRVs weiter kalibrieren
     }
 
 
@@ -167,8 +188,9 @@ def validate_shape(doc: Any) -> list[str]:
                     errors.append(f"presets: unbekannte Betriebsart {key}")
                 elif not _is_num(v) or not TARGET_MIN <= v <= TARGET_MAX:
                     errors.append(f"presets.{key} muss zwischen 5 und 30 °C liegen")
-    if "lock_manual" in doc and not isinstance(doc["lock_manual"], bool):
-        errors.append("lock_manual muss wahr oder falsch sein")
+    for key in ("lock_manual", "calibrate_released"):
+        if key in doc and not isinstance(doc[key], bool):
+            errors.append(f"{key} muss wahr oder falsch sein")
     return errors
 
 
@@ -223,6 +245,10 @@ class TrvCaps:
     mode_prop: str | None = None
     on_value: str | None = None
     off_value: str | None = None
+    release_values: tuple[str, ...] = ()  # Gerät steuert selbst (Haven gibt frei)
+    boost_values: tuple[str, ...] = ()  # davon nur kurz (Ventil offen)
+    comfort_temp: str | None = None  # Komfort-Temperatur am Gerät (Regelmodus ``comfort``)
+    hysteresis: str | None = None  # Ventilverhalten, ``comfort`` = stufenlos
 
 
 def _flatten(exposes: Any) -> list[dict[str, Any]]:
@@ -261,14 +287,33 @@ def trv_caps(exposes: Any) -> TrvCaps:
     preset_values = [str(v) for v in (preset or {}).get("values") or []]
     system = by.get("system_mode")
     system_values = [str(v) for v in (system or {}).get("values") or []]
-    if preset is not None and _writable(preset) and ("on" in preset_values or "manual" in preset_values):
-        caps.mode_prop = "preset"
-        caps.on_value = "on" if "on" in preset_values else "manual"
+    preset_ok = preset is not None and _writable(preset)
+    system_ok = system is not None and _writable(system) and "heat" in system_values
+    # Regelmodus: nie ``on`` (bei Tuya „Ventil dauerhaft offen“)
+    if preset_ok and "manual" in preset_values:
+        caps.mode_prop, caps.on_value = "preset", "manual"
+    elif system_ok:
+        caps.mode_prop, caps.on_value = "system_mode", "heat"
+    elif preset_ok and "comfort" in preset_values:
+        caps.mode_prop, caps.on_value = "preset", "comfort"
+    elif preset_ok and "heat" in preset_values:
+        caps.mode_prop, caps.on_value = "preset", "heat"
+    if caps.mode_prop == "preset":
         caps.off_value = "off" if "off" in preset_values else None
-    elif system is not None and _writable(system) and "heat" in system_values:
-        caps.mode_prop = "system_mode"
-        caps.on_value = "heat"
+        values = preset_values
+    elif caps.mode_prop == "system_mode":
         caps.off_value = "off" if "off" in system_values else None
+        values = system_values
+    else:
+        values = []
+    caps.release_values = tuple(v for v in values if v in _SELF_CONTROL and v != caps.on_value)
+    caps.boost_values = tuple(v for v in caps.release_values if v in _BOOST)
+    comfort = by.get("comfort_temperature")
+    if caps.on_value == "comfort" and comfort is not None and _writable(comfort):
+        caps.comfort_temp = "comfort_temperature"
+    hyst = by.get("hysteresis")
+    if hyst is not None and _writable(hyst) and "comfort" in [str(v) for v in hyst.get("values") or []]:
+        caps.hysteresis = "hysteresis"
     return caps
 
 
@@ -283,6 +328,8 @@ class TrvReading:
     heating: bool | None = None
     valve: int | None = None
     available: bool = True
+    comfort_temp: float | None = None
+    hysteresis: str | None = None
 
 
 def _num(v: Any) -> float | None:
@@ -311,6 +358,8 @@ def trv_reading(values: dict[str, Any] | None, caps: TrvCaps, *, available: bool
         heating=None if running is None else str(running).lower() in ("heat", "heating"),
         valve=None if valve is None else round(valve),
         available=available,
+        comfort_temp=_num(v.get(caps.comfort_temp)) if caps.comfort_temp else None,
+        hysteresis=str(v[caps.hysteresis]) if caps.hysteresis and v.get(caps.hysteresis) is not None else None,
     )
 
 
@@ -355,6 +404,15 @@ class TrvMemo:
     cal_included: bool | None = None  # gemeldete Temperatur enthält die Kalibrierung (None = noch nicht gesehen, gilt als ja)
     cal_ref_local: float | None = None
     cal_ref_delta: float | None = None
+    corr_ema: float | None = None  # geglättete Abweichung Raum − TRV-Rohmessung
+    corr_at: float | None = None
+    seen_valve: int | None = None
+    valve_changed_at: float | None = None  # Ventil hat umgeschaltet (Fühler am Heizkörper ändert sich)
+    released_at: float | None = None  # am Gerät auf eigene Steuerung gestellt, Haven hält still
+    released_mode: str | None = None
+    release_until: float | None = None  # Ventil offen: so lange, dann übernimmt Haven wieder
+    sent_comfort_at: float | None = None
+    sent_hysteresis_at: float | None = None
 
 
 @dataclass
@@ -472,6 +530,7 @@ def observe(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
     new = _copy(state)
     now = inputs.now
     events: list[str] = []
+    room, source = room_temperature(inputs)
 
     # Fenster: Pause nach Verzögerung, Weiter nach Verzögerung (unbekannt zählt als zu)
     open_any = any(v is True for v in inputs.windows.values())
@@ -544,15 +603,45 @@ def observe(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
             memo.seen_local = r.local
         if r.calibration is not None:
             memo.seen_calibration = r.calibration
+        # Ventil umgeschaltet: der Fühler am Heizkörper ändert sich gleich, Kalibrierung kurz halten
+        if r.valve is not None:
+            if memo.seen_valve is not None and abs(r.valve - memo.seen_valve) >= VALVE_JUMP:
+                memo.valve_changed_at = now
+            memo.seen_valve = r.valve
+        # Abweichung Raum − TRV geglättet (nicht, solange eine neue Kalibrierung noch nicht gemessen ist)
+        raw = raw_temperature(r, memo)
+        if source == "sensors" and room is not None and raw is not None and r.available and memo.cal_changed_at is None:
+            corr = room - raw
+            if memo.corr_ema is None or memo.corr_at is None or now - memo.corr_at > 8 * CAL_TAU:
+                memo.corr_ema = corr
+            else:
+                dt = max(0.0, now - memo.corr_at)
+                memo.corr_ema += (corr - memo.corr_ema) * (1 - math.exp(-dt / CAL_TAU))
+            memo.corr_ema = round(memo.corr_ema, 3)
+            memo.corr_at = now
+        # Ventil offen am Gerät: nach einer Weile übernimmt Haven wieder
+        if memo.released_at is not None and memo.release_until is not None and now >= memo.release_until:
+            _resume(memo)
+            events.append("resume_boost")
         if not first and options.get("enabled", True) and not options.get("lock_manual"):
-            if mode_changed and r.mode != memo.sent_mode:
+            if mode_changed and r.mode in caps.release_values and r.mode != memo.sent_mode:
+                # Gerät steuert selbst (Ventil offen, eigener Wochenplan): freigeben statt zurückstellen
+                memo.released_at = now
+                memo.released_mode = r.mode
+                memo.release_until = now + BOOST_RETURN if r.mode in caps.boost_values else None
+                events.append(f"released:{r.mode}")
+            elif mode_changed and (r.mode != memo.sent_mode or memo.released_at is not None):
+                if memo.released_at is not None:
+                    _resume(memo)
+                    events.append("resume_device")
                 adopted = _PRESET_TO_MODE.get(str(r.mode).lower())
                 if adopted is not None and adopted != new.mode:
                     new.mode = adopted
                     new.changed_at = now
                     events.append(f"manual_mode:{adopted}")
             elif (
-                sp_changed
+                memo.released_at is None
+                and sp_changed
                 and not mode_changed
                 and not _same(r.setpoint, memo.sent_setpoint)
                 and not _same(r.setpoint, memo.prev_sent_setpoint)
@@ -576,13 +665,19 @@ def observe(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
     return new, events
 
 
+def _resume(memo: TrvMemo) -> None:
+    memo.released_at = memo.released_mode = memo.release_until = None
+
+
 def next_wake(options: dict[str, Any], state: HeatingState) -> float | None:
-    """Nächster Zeitpunkt, zu dem sich ohne neue Meldung etwas ändert (Fenster-Verzögerungen)."""
+    """Nächster Zeitpunkt, zu dem sich ohne neue Meldung etwas ändert (Fenster-Verzögerungen, Ende einer
+    Freigabe mit offenem Ventil)."""
+    times = [m.release_until for m in state.trvs.values() if m.released_at is not None and m.release_until is not None]
     if state.window_open_since is not None and not state.paused:
-        return state.window_open_since + options.get("window_open_delay", 0)
+        times.append(state.window_open_since + options.get("window_open_delay", 0))
     if state.paused and state.window_closed_since is not None:
-        return state.window_closed_since + options.get("window_close_delay", 0)
-    return None
+        times.append(state.window_closed_since + options.get("window_close_delay", 0))
+    return min(times) if times else None
 
 
 # --- Planen -----------------------------------------------------------------------------------
@@ -597,6 +692,9 @@ class TrvPlan:
     calibration: float | None = None
     method: str = "none"
     correction: float | None = None  # Raum − TRV-Rohmessung
+    released: bool = False  # am Gerät freigegeben: kein Modus, kein Sollwert
+    comfort_temp: float | None = None
+    hysteresis: str | None = None
 
 
 def desired(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) -> dict[str, TrvPlan]:
@@ -609,16 +707,33 @@ def desired(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
         caps, r = trv.caps, trv.reading
         memo = state.trvs.get(ieee) or TrvMemo()
         p = TrvPlan(method=method_for(options, caps, source))
+        p.released = memo.released_at is not None
+        if p.released and not options.get("calibrate_released", True) and p.method == "offset":
+            p.method = "none"  # freigegeben ohne Kalibrierung: eigene zurücknehmen (unten)
         raw = raw_temperature(r, memo)
         if room is not None and raw is not None and source == "sensors":
             p.correction = round(room - raw, 2)
         if p.method == "offset" and p.correction is not None:
-            cal = min(caps.cal_max, max(caps.cal_min, p.correction))
+            # Gedämpft: geglättete Abweichung, je Schritt höchstens CAL_MAX_STEP (der erste Schritt voll)
+            want = memo.corr_ema if memo.corr_ema is not None else p.correction
+            base = r.calibration
+            if memo.sent_calibration_at is not None and inputs.now - memo.sent_calibration_at < RESEND:
+                base = memo.sent_calibration  # gerade gesendet, Bestätigung steht aus
+            if memo.sent_calibration is not None and base is not None:
+                want = min(base + CAL_MAX_STEP, max(base - CAL_MAX_STEP, want))
+            cal = min(caps.cal_max, max(caps.cal_min, want))
             p.calibration = round(_round_step(cal, caps.cal_step), 1)
-        elif options.get("calibration") != "offset" and caps.calibration and memo.sent_calibration not in (None, 0.0):
+        elif (
+            options.get("calibration") != "offset" or (p.released and not options.get("calibrate_released", True))
+        ) and caps.calibration and memo.sent_calibration not in (None, 0.0):
             p.calibration = 0.0  # Korrektur abgewählt: eigene Kalibrierung zurücknehmen
         else:
             p.calibration = r.calibration if r.calibration is not None else memo.sent_calibration
+        if p.released:
+            out[ieee] = p  # Gerät steuert selbst: weder Modus noch Sollwert
+            continue
+        if caps.hysteresis:
+            p.hysteresis = "comfort"  # Ventil stufenlos statt auf/zu
         if reason is not None or target is None:
             if caps.off_value is not None:
                 p.mode = caps.off_value
@@ -632,6 +747,9 @@ def desired(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
         if p.method == "target" and room is not None and r.local is not None:
             sp = target + (r.local - room)
         p.setpoint = min(caps.max, max(caps.min, _round_step(sp, caps.step)))
+        if caps.comfort_temp:
+            # Regelmodus ``comfort``: auch die Komfort-Temperatur des Geräts, falls es auf sie zurückfällt
+            p.comfort_temp = p.setpoint
         out[ieee] = p
     return out
 
@@ -679,7 +797,11 @@ def plan(
         # Kalibrierung (nur ``offset``)
         if p.method == "offset" and caps.calibration and p.calibration is not None:
             current = r.calibration
-            settling = memo.cal_changed_at is not None and now - memo.cal_changed_at < CAL_SETTLE
+            settling = (memo.cal_changed_at is not None and now - memo.cal_changed_at < CAL_SETTLE) or (
+                memo.sent_calibration is not None
+                and memo.valve_changed_at is not None
+                and now - memo.valve_changed_at < VALVE_SETTLE
+            )
             due = memo.sent_calibration_at is None or now - memo.sent_calibration_at >= CAL_INTERVAL
             far = current is None or abs(p.calibration - current) >= CAL_DEADBAND
             waiting = _same(p.calibration, memo.sent_calibration) and memo.sent_calibration_at is not None and now - memo.sent_calibration_at < RESEND
@@ -689,6 +811,15 @@ def plan(
         elif p.calibration == 0.0 and caps.calibration and memo.sent_calibration not in (None, 0.0) and not _same(r.calibration, 0.0):
             values[caps.calibration] = 0.0
             memo.sent_calibration, memo.sent_calibration_at = 0.0, now
+        # Komfort-Temperatur und Ventilverhalten (selten, nur bei Abweichung)
+        if p.comfort_temp is not None and caps.comfort_temp and not _same(r.comfort_temp, p.comfort_temp):
+            if memo.sent_comfort_at is None or now - memo.sent_comfort_at >= RESEND:
+                values[caps.comfort_temp] = p.comfort_temp
+                memo.sent_comfort_at = now
+        if p.hysteresis is not None and caps.hysteresis and r.hysteresis is not None and r.hysteresis != p.hysteresis:
+            if memo.sent_hysteresis_at is None or now - memo.sent_hysteresis_at >= RESEND:
+                values[caps.hysteresis] = p.hysteresis
+                memo.sent_hysteresis_at = now
         if values:
             commands[ieee] = values
     return new, commands
@@ -706,7 +837,7 @@ def status(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) 
     for ieee, trv in inputs.trvs.items():
         r, p = trv.reading, plans[ieee]
         pending = False
-        if r.available and options.get("enabled", True):
+        if r.available and options.get("enabled", True) and not p.released:
             pending = (p.mode is not None and trv.caps.mode_prop is not None and r.mode != p.mode) or (
                 p.setpoint is not None and r.setpoint is not None and abs(r.setpoint - p.setpoint) >= trv.caps.step
             )
@@ -726,6 +857,9 @@ def status(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) 
                 "desired_setpoint": p.setpoint,
                 "desired_calibration": p.calibration if p.method == "offset" else None,
                 "pending": pending,
+                "released": p.released,
+                "released_mode": (state.trvs.get(ieee) or TrvMemo()).released_mode if p.released else None,
+                "release_until": (state.trvs.get(ieee) or TrvMemo()).release_until if p.released else None,
             }
         )
     heating_flags = [t["heating"] for t in trvs if t["heating"] is not None]
@@ -741,6 +875,7 @@ def status(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) 
         "room_source": source,
         "sensors": [{"entity_id": e, "value": v} for e, v in inputs.sensors.items()],
         "reason": reason,
+        "released": any(t["released"] for t in trvs),
         "heating": (any(heating_flags) if heating_flags else None) if reason is None else False,
         "window": {
             "open": window_open,
@@ -770,8 +905,13 @@ def status(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) 
 
 
 def control(state: HeatingState, *, target: Any = None, mode: Any = None, now: float) -> HeatingState:
-    """Ziel und/oder Betriebsart setzen (App). Ein Ziel ohne Betriebsart schaltet auf Manuell."""
+    """Ziel und/oder Betriebsart setzen (App). Ein Ziel ohne Betriebsart schaltet auf Manuell. Jede Bedienung
+    in der App übernimmt am Gerät freigegebene TRVs wieder; ohne Ziel und Betriebsart nur das."""
     new = _copy(state)
+    for memo in new.trvs.values():
+        _resume(memo)
+    if target is None and mode is None:
+        return new
     if mode is not None:
         if mode not in MODES:
             raise Z2MError("invalid_format", "mode muss heat, comfort, eco, away oder off sein")

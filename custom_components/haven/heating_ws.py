@@ -67,6 +67,7 @@ async def ws_heating_delete(hass: HomeAssistant, connection: websocket_api.Activ
         vol.Required("area_id"): str,
         vol.Optional("target"): vol.Coerce(float),
         vol.Optional("mode"): vol.In(MODES),
+        vol.Optional("resume"): bool,
     }
 )
 @websocket_api.async_response
@@ -74,7 +75,9 @@ async def ws_heating_control(hass: HomeAssistant, connection: websocket_api.Acti
     runner = get_heating(hass)
     await runner.async_load()
     try:
-        status = await runner.async_control(msg["area_id"], target=msg.get("target"), mode=msg.get("mode"))
+        status = await runner.async_control(
+            msg["area_id"], target=msg.get("target"), mode=msg.get("mode"), resume=bool(msg.get("resume"))
+        )
     except Z2MError as err:
         connection.send_error(msg["id"], err.code, err.message)
         return

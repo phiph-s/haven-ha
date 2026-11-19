@@ -225,7 +225,7 @@ def _advance(hass: FakeHass, clock: Clock, seconds: float) -> None:
 def _setup(runner, hass, bridge, **config):
     hass.set_state(SENSOR, "20.0")
     hass.set_state(WINDOW, "off")
-    bridge.report(TRV_A, local_temperature=24.0, current_heating_setpoint=21.0, local_temperature_calibration=0, preset="on")
+    bridge.report(TRV_A, local_temperature=24.0, current_heating_setpoint=21.0, local_temperature_calibration=0, preset="comfort")
     asyncio.run(runner.async_load())
     runner.attach(bridge)
     doc = {"area_id": "salon", "trvs": [TRV_A], "sensors": [SENSOR], "windows": [WINDOW], **config}
@@ -270,13 +270,13 @@ def test_window_pause_through_state_change_and_timer(rig):
     status = runner.status("salon")
     assert status["window"]["resume_at"] is not None
     _advance(hass, clock, 121)
-    assert bridge.published[-1] == ("Heizung Salon", {"preset": "on"})
+    assert bridge.published[-1] == ("Heizung Salon", {"preset": "comfort"})
     assert runner.status("salon")["reason"] is None
 
 
 def test_knob_on_device_reaches_second_trv(rig):
     runtime, clock, hass, bridge, runner = rig
-    bridge.report(TRV_B, local_temperature=23.0, current_heating_setpoint=21.0, local_temperature_calibration=0, preset="on")
+    bridge.report(TRV_B, local_temperature=23.0, current_heating_setpoint=21.0, local_temperature_calibration=0, preset="comfort")
     _setup(runner, hass, bridge, calibration="none", trvs=[TRV_A, TRV_B])
     bridge.published.clear()
     clock.t += 300
@@ -307,3 +307,21 @@ def test_delete_resets_calibration(rig):
     hass.drain()
     assert bridge.published[-1] == ("Heizung Salon", {"local_temperature_calibration": 0})
     assert runner.list_public() == [] and hass.trackers == []
+
+
+def test_open_valve_on_device_is_released_and_resumed_from_app(rig):
+    runtime, clock, hass, bridge, runner = rig
+    _setup(runner, hass, bridge, calibration="none")
+    bridge.published.clear()
+    clock.t += 100
+    bridge.report(TRV_A, preset="on")
+    hass.drain()
+    assert bridge.published == []
+    assert runner.status("salon")["released"] is True
+    # Ende der Freigabe ist als Wecker geplant
+    assert any(not t["cancelled"] for t in hass.timers)
+    status = asyncio.run(runner.async_control("salon", resume=True))
+    hass.drain()
+    assert status["released"] is False
+    assert bridge.published[-1] == ("Heizung Salon", {"preset": "comfort"})
+    assert hass.errors == []
