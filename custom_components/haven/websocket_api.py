@@ -17,6 +17,8 @@ from homeassistant.loader import async_get_integration
 
 from .appdata import (
     build_event_data,
+    controls,
+    is_locked,
     normalize_prefs,
     require_valid,
     resolve_updated_at,
@@ -441,6 +443,8 @@ def _z2m_write(handler):
 @_z2m_write
 async def ws_zigbee_set(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
     device = _target(bridge, msg["ieee"])
+    if controls(msg["values"]) and is_locked(await get_storage(hass).async_get_prefs(), msg["ieee"]):
+        raise Z2MError("locked", f"{device['friendly_name']} ist gesperrt und bleibt an")
     await bridge.async_publish_set(device["friendly_name"], build_set(msg["values"]))
     return {"ok": True}
 

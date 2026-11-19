@@ -80,9 +80,15 @@ def validate_widgets(widgets: Any) -> list[str]:
 
 
 def validate_prefs(prefs: Any) -> list[str]:
-    """Objekt; ``excluded_lights`` optional, Liste von ``light.*``-IDs. Unbekannte Schlüssel sind erlaubt."""
+    """Objekt; ``excluded_lights`` optional, Liste von ``light.*``-IDs; ``locked`` optional, Liste von Entity-IDs
+    und IEEE-Adressen gesperrter Geräte („immer an“). Unbekannte Schlüssel sind erlaubt."""
     if not isinstance(prefs, dict):
         return ["prefs muss ein JSON-Objekt sein"]
+    locked = prefs.get("locked", [])
+    if not isinstance(locked, list) or len(locked) > MAX_DOC_ITEMS:
+        return ["locked muss eine Liste sein"]
+    if not all(isinstance(i, str) and i for i in locked):
+        return ["locked: jeder Eintrag muss ein Text sein"]
     excluded = prefs.get("excluded_lights", [])
     if not isinstance(excluded, list):
         return ["excluded_lights muss eine Liste sein"]
@@ -101,7 +107,24 @@ def normalize_prefs(prefs: dict[str, Any]) -> dict[str, Any]:
     """Gültige Prefs mit ``excluded_lights`` (Duplikate entfernt, Reihenfolge bleibt)."""
     excluded = prefs.get("excluded_lights")
     items = [i for i in excluded if isinstance(i, str)] if isinstance(excluded, list) else []
-    return {**prefs, "excluded_lights": list(dict.fromkeys(items))}
+    locked = prefs.get("locked")
+    locks = [i for i in locked if isinstance(i, str) and i] if isinstance(locked, list) else []
+    return {**prefs, "excluded_lights": list(dict.fromkeys(items)), "locked": list(dict.fromkeys(locks))}
+
+
+# Z2M-Werte, die ein Gerät schalten (bei gesperrten Geräten abgelehnt). Einstellungen bleiben erlaubt.
+_CONTROL_KEYS = ("state", "brightness", "color", "color_temp", "effect")
+
+
+def controls(values: dict[str, Any]) -> bool:
+    """Schaltet ``values`` das Gerät (Zustand, Helligkeit, Farbe), statt nur etwas einzustellen?"""
+    return any(k == c or k.startswith(c + "_") for k in values for c in _CONTROL_KEYS)
+
+
+def is_locked(prefs: dict[str, Any], ieee: str | None = None, entities: list[str] | None = None) -> bool:
+    """Gerät gesperrt (IEEE oder eine seiner Entities in ``locked``)?"""
+    locked = set(prefs.get("locked") or [])
+    return (ieee is not None and ieee in locked) or any(e in locked for e in entities or [])
 
 
 def validate_updated_at(value: Any) -> list[str]:

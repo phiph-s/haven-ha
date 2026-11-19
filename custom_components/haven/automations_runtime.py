@@ -192,7 +192,9 @@ class AutomationEngine:
     async def async_refresh_excluded(self) -> None:
         from .storage import get_storage  # noqa: PLC0415
 
-        self._excluded = list((await get_storage(self.hass).async_get_prefs()).get("excluded_lights", []))
+        prefs = await get_storage(self.hass).async_get_prefs()
+        # Gesperrte Geräte („immer an“) schaltet keine Automation.
+        self._excluded = list(dict.fromkeys([*prefs.get("excluded_lights", []), *prefs.get("locked", [])]))
         self.invalidate_rooms()
 
     def _room_state(self, room: RoomTarget) -> RoomState:

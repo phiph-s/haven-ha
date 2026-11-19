@@ -76,7 +76,7 @@ def test_prefs():
     ok = {"excluded_lights": ["light.salon", "light.zgkochbereich"]}
     assert appdata.validate_prefs(ok) == []
     assert appdata.validate_prefs({}) == []
-    assert appdata.normalize_prefs({}) == {"excluded_lights": []}
+    assert appdata.normalize_prefs({}) == {"excluded_lights": [], "locked": []}
     # Falsche Typen
     assert appdata.validate_prefs([]) != []
     assert appdata.validate_prefs({"excluded_lights": "light.a"}) != []
@@ -87,11 +87,27 @@ def test_prefs():
     # Duplikate werden still entfernt, Reihenfolge bleibt
     dup = {"excluded_lights": ["light.b", "light.a", "light.b"]}
     assert appdata.validate_prefs(dup) == []
-    assert appdata.normalize_prefs(dup) == {"excluded_lights": ["light.b", "light.a"]}
+    assert appdata.normalize_prefs(dup) == {"excluded_lights": ["light.b", "light.a"], "locked": []}
     # Unbekannte Schlüssel bleiben erhalten
     extra = {"excluded_lights": ["light.a"], "theme": {"dark": True}}
     assert appdata.validate_prefs(extra) == []
-    assert appdata.normalize_prefs(extra) == extra
+    assert appdata.normalize_prefs(extra) == {**extra, "locked": []}
+
+
+def test_prefs_locked_devices():
+    prefs = {"locked": ["0x00124b0000000041", "switch.steckdose_server", "switch.steckdose_server"]}
+    assert appdata.validate_prefs(prefs) == []
+    assert appdata.normalize_prefs(prefs)["locked"] == ["0x00124b0000000041", "switch.steckdose_server"]
+    assert appdata.validate_prefs({"locked": "x"}) != []
+    assert appdata.validate_prefs({"locked": [1]}) != []
+    norm = appdata.normalize_prefs(prefs)
+    assert appdata.is_locked(norm, "0x00124b0000000041")
+    assert appdata.is_locked(norm, entities=["switch.steckdose_server"])
+    assert not appdata.is_locked(norm, "0x00124b0000000042")
+    # Schalten wird abgelehnt, Einstellen nicht
+    assert appdata.controls({"state": "OFF"}) and appdata.controls({"state_l2": "OFF"})
+    assert appdata.controls({"brightness": 10}) and appdata.controls({"color_temp": 300})
+    assert not appdata.controls({"power_on_behavior": "on"}) and not appdata.controls({"child_lock": "LOCK"})
 
 
 # --- 0.3.0: Events, updated_at/layout, Networkmap-Cache ---------------------------------
