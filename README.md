@@ -69,6 +69,8 @@ Raum = HA-Bereich. Bereich einer Entity: eigener Bereich vor Gerätebereich. Gez
                  "ieee": "0x...", "entities": ["sensor.sensor_waschraum_temperature", "sensor.sensor_waschraum_humidity"]}]}
 ```
 
+Geräte anderer Funkprotokolle bekommen ab 0.6.34 `protocol` (`"matter"` oder `"zwave"`, aus den Kennungen der Geräte-Registry) und `sw_version`, z. B. `{"device_id": "...", "name": "Stehleuchte", "manufacturer": "Nanoleaf", "model": "Essentials A19", "ieee": null, "protocol": "matter", "sw_version": "3.5.10", "entities": ["light.stehleuchte"]}`. Zigbee erkennt die App an `ieee`. Feature-Flag: `device_protocol`.
+
 ### `haven/zigbee/devices`
 ```json
 {"devices": [{"ieee": "0x00124b000000000a", "friendly_name": "Bewegungsmelder Waschraum", "type": "EndDevice",

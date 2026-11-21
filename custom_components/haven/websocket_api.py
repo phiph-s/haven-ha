@@ -53,7 +53,7 @@ from .scenes import (
     stored,
     validate_look,
 )
-from .rooms import AreaData, DeviceData, EntityData, assemble_rooms
+from .rooms import AreaData, DeviceData, EntityData, assemble_rooms, protocol_of_identifiers
 from .scenesync import attach_sync
 from .scenesync_runtime import SceneSync, group_lock
 from .storage import HavenStorage, get_storage
@@ -307,6 +307,8 @@ def build_rooms(hass: HomeAssistant, bridge: Z2MBridge) -> dict[str, Any]:
                 area_id=device.area_id,
                 disabled=device.disabled_by is not None,
                 service=device.entry_type is dr.DeviceEntryType.SERVICE,
+                protocol=protocol_of_identifiers(device.identifiers),
+                sw_version=device.sw_version,
             )
         return devices[device.id]
 

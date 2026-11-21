@@ -38,6 +38,8 @@ class DeviceData:
     area_id: str | None = None
     disabled: bool = False
     service: bool = False
+    protocol: str | None = None  # Funkprotokoll außer Zigbee: ``matter``, ``zwave`` (Zigbee steckt in ``ieee``)
+    sw_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,18 @@ class EntityData:
         return self.entity_id.split(".", 1)[0]
 
 
+# Domänen der Geräte-Kennungen (``identifiers``) je Funkprotokoll.
+_PROTOCOL_DOMAINS = {"matter": "matter", "zwave_js": "zwave"}
+
+
+def protocol_of_identifiers(identifiers: Any) -> str | None:
+    """Funkprotokoll außer Zigbee aus den Geräte-Kennungen (``matter``, ``zwave``), sonst ``None``."""
+    for item in identifiers or ():
+        if isinstance(item, (tuple, list)) and item and item[0] in _PROTOCOL_DOMAINS:
+            return _PROTOCOL_DOMAINS[item[0]]
+    return None
+
+
 def _device_item(device: DeviceData) -> dict[str, Any]:
     return {
         "device_id": device.device_id,
@@ -66,6 +80,8 @@ def _device_item(device: DeviceData) -> dict[str, Any]:
         "manufacturer": device.manufacturer,
         "model": device.model,
         "ieee": device.ieee,
+        **({"protocol": device.protocol} if device.protocol else {}),
+        **({"sw_version": device.sw_version} if device.protocol and device.sw_version else {}),
         "entities": [],
     }
 

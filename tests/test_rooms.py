@@ -126,3 +126,21 @@ def test_room_keys(inventory):
         "area_id", "name", "floor_id", "icon", "lights", "light_groups", "zigbee_lights",
         "climate", "motion", "group", "group_entity", "devices",
     }
+
+
+def test_protocol_of_identifiers():
+    protocol_of_identifiers = rooms_mod.protocol_of_identifiers
+
+    assert protocol_of_identifiers({("matter", "deviceid_ABC-1")}) == "matter"
+    assert protocol_of_identifiers({("zwave_js", "123-4")}) == "zwave"
+    assert protocol_of_identifiers({("mqtt", "zigbee2mqtt_0x1")}) is None
+    assert protocol_of_identifiers(None) is None
+
+
+def test_matter_device_item(inventory):
+    DeviceData, _device_item = rooms_mod.DeviceData, rooms_mod._device_item
+
+    item = _device_item(DeviceData("d_m", "Lampe", "Lampe", "Eve", "Light Strip", None, "salon", protocol="matter", sw_version="1.2"))
+    assert item["protocol"] == "matter" and item["sw_version"] == "1.2"
+    plain = _device_item(DeviceData("d_x", "X", "X", None, None, "0x1", None, sw_version="9"))
+    assert "protocol" not in plain and "sw_version" not in plain
