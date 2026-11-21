@@ -436,6 +436,15 @@ Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, melde
 - **Build:** In der App `tool/build_ha_panel.sh` ausführen (siehe README der App). Die Version wird aus dieser `manifest.json` gelesen und muss dazu passen, nach jeder neuen Version also neu bauen. Die Dateien sind eingecheckt, sonst fehlen sie bei HACS. Größe etwa 13 MB (CanvasKit 7 MB, App 4 MB, Lizenztexte 1,4 MB).
 - Annahmen zur HA-API sind am Quelltext von HA 2026.2 geprüft, nicht an einem laufenden HA. Falls Tastatur oder Eingabefelder im Panel hängen: `EMBED_IFRAME = True` in `panel.py` (HA lädt das Modul dann in einem iframe).
 
+### Als App installieren (PWA)
+
+Unter `https://<dein-ha>/haven_app/` liefert die Integration Haven als eigenständige, installierbare Web-App aus. Chrome und Edge bieten dort „Installieren“ an, auf Android „Zum Startbildschirm hinzufügen“, auf dem iPhone in Safari „Teilen › Zum Home-Bildschirm“. Haven läuft dann im eigenen Fenster ohne die Oberfläche von HA. In der App führt *Einstellungen › Als App installieren* (im Seitenleisten-Eintrag) dorthin.
+
+- **Anmeldung:** wie die Apps von HA über den Login von HA (OAuth2, `/auth/authorize` und `/auth/token`). Client-ID und Rücksprung sind `https://<dein-ha>/haven_app/`, HA erlaubt das ohne Einrichtung, weil beides auf demselben Host liegt. Die Tokens liegen im Browser dieser Adresse. Das Zugriffstoken wird vor Ablauf erneuert, *Einstellungen › Abmelden* widerruft die Anmeldung (`/auth/revoke`). In HA erscheint sie unter *Profil › Sicherheit › Aktualisierungs-Token*.
+- **Voraussetzung:** HTTPS (Browser installieren Web-Apps nur über eine sichere Verbindung), z. B. Nabu Casa, ein Reverse Proxy oder ein Tunnel. Über `http://…:8123` läuft die Seite auch, lässt sich aber nicht installieren.
+- **Dateien:** Seite, `manifest.webmanifest` und `sw.js` unter der festen Adresse (Views ohne Anmeldung, nichts Geheimes darin, `panel.app_html` und `panel.app_manifest`), alles andere aus dem versionierten Build (`haven-app.js`). Der Service Worker speichert nichts zwischen, Zustände und Bilder kommen immer frisch aus HA. Nach einem Update der Integration lädt die Seite die neue Version.
+- **iOS:** Web-Apps auf dem Home-Bildschirm laufen, bekommen aber keine Hintergrundaktualisierung.
+
 ## Entwicklung und Tests
 ```
 cd integration && python3 -m pytest -q

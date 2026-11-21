@@ -82,3 +82,93 @@ def panel_registration(version: str | None, *, require_admin: bool = False) -> d
         "require_admin": require_admin,
         "config": {"base_url": f"{base}/", "version": safe_version(version)},
     }
+
+
+# ---- Installierbare Web-App (PWA) --------------------------------------
+# Feste Adresse (Startadresse und Geltungsbereich der installierten App
+# dürfen sich nicht mit jeder Version ändern). Die Seite lädt den
+# versionierten Build und meldet sich selbst bei HA an (haven-app.js).
+APP_URL_PATH = "/haven_app"
+APP_MODULE = "haven-app.js"
+APP_BG = {"light": "#F6F1EA", "dark": "#0D0C12"}
+
+
+def app_html(version: str | None) -> str:
+    """Startseite der Web-App. Enthält nichts Geheimes (ohne Anmeldung)."""
+    base = static_url(version)
+    return f"""<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Haven</title>
+<meta name="description" content="Haven für Home Assistant">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="{APP_BG["light"]}">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="{APP_BG["dark"]}">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Haven">
+<link rel="manifest" href="{APP_URL_PATH}/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="{base}/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="{base}/favicon.png">
+<link rel="apple-touch-icon" href="{base}/apple-touch-icon.png">
+<style>
+html,body{{margin:0;height:100%;background:{APP_BG["light"]};color:#6C6477}}
+@media (prefers-color-scheme: dark){{html,body{{background:{APP_BG["dark"]};color:#968FA5}}}}
+#haven-loading{{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+font:600 15px system-ui,sans-serif;letter-spacing:.2px;padding:24px;text-align:center}}
+</style>
+</head>
+<body>
+<div id="haven-loading">Haven lädt</div>
+<noscript>Haven braucht JavaScript.</noscript>
+<script type="module" src="{base}/{APP_MODULE}"></script>
+</body>
+</html>
+"""
+
+
+def app_manifest(version: str | None) -> dict[str, Any]:
+    """Web-App-Manifest. Symbole aus dem versionierten Build."""
+    base = static_url(version)
+    icons = [
+        {"src": f"{base}/icons/Icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": f"{base}/icons/Icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {
+            "src": f"{base}/icons/Icon-maskable-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "maskable",
+        },
+        {
+            "src": f"{base}/icons/Icon-maskable-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable",
+        },
+    ]
+    return {
+        "id": f"{APP_URL_PATH}/",
+        "name": "Haven",
+        "short_name": "Haven",
+        "description": "Haven für Home Assistant",
+        "start_url": f"{APP_URL_PATH}/",
+        "scope": f"{APP_URL_PATH}/",
+        "display": "standalone",
+        "background_color": APP_BG["light"],
+        "theme_color": APP_BG["light"],
+        "prefer_related_applications": False,
+        "icons": icons,
+    }
+
+
+# Service Worker nur fürs Installieren: reicht jede Anfrage ans Netz durch
+# und speichert nichts (Zustände und Bilder kommen immer frisch aus HA, neue
+# Versionen haben eine neue URL).
+APP_SERVICE_WORKER = """// Haven: nichts zwischenspeichern, alles ans Netz.
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", () => {});
+"""
+

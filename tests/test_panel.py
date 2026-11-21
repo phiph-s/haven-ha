@@ -61,6 +61,23 @@ def test_panel_module_in_repo_matches_config():
         assert dep in manifest["dependencies"]
 
 
+def test_web_app_page_and_manifest():
+    """Installierbare Web-App: feste Adresse, Dateien aus dem Versions-Build."""
+    html = panel.app_html("0.7.0")
+    assert '<link rel="manifest" href="/haven_app/manifest.webmanifest">' in html
+    assert '<script type="module" src="/haven_static/0.7.0/haven-app.js"></script>' in html
+    assert "token" not in html.lower()
+    m = panel.app_manifest("0.7.0")
+    assert m["start_url"] == m["scope"] == m["id"] == "/haven_app/"
+    assert m["display"] == "standalone"
+    assert {i["purpose"] for i in m["icons"]} == {"any", "maskable"}
+    assert all(i["src"].startswith("/haven_static/0.7.0/icons/") for i in m["icons"])
+    # Der Worker speichert nichts (Zustände kommen immer frisch aus HA).
+    assert "caches" not in panel.APP_SERVICE_WORKER
+    # Version mit Fremdzeichen landet nicht roh in der Seite.
+    assert "<x>" not in panel.app_html("<x>")
+
+
 PLAN = {"version": 2, "grid": {"cols": 10, "rows": 10}, "rooms": [], "placements": []}
 SOFA = {"id": "s", "kind": "sofa", "x": 4, "y": 4, "w": 4.4, "h": 1.8, "rotation": 90}
 
