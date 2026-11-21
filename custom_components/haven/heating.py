@@ -25,6 +25,20 @@ zur Betriebsart des Raums. Stellt jemand das Gerät auf ``on`` (Ventil offen) od
 gibt Haven dieses TRV frei und schickt ihm weder Modus noch Sollwert, bis jemand in der App wieder übernimmt
 (``on`` holt Haven nach ``BOOST_RETURN`` von selbst zurück). Die Kalibrierung läuft auf Wunsch weiter.
 
+Display (``display``): Ein Wandthermostat mit Anzeige (z. B. Beok BOT-R9V-ZB), das als reines Display markiert
+ist (``displays`` im Store), regelt Haven nie als Heizkörperthermostat und kalibriert es nie. Es ist die
+Bedienung des Raums: Sein Sollwert wird das Ziel des Raums (auch mit ``lock_manual`` und in Fenster- oder
+Sommerpause), Aus/Ein am Display schaltet die Betriebsart des Raums. Haven spiegelt das wirksame Ziel (auch
+Eco/Abwesend) auf das Display und schaltet es bei Betriebsart Aus und in der Fensterpause ab, nicht im Sommer.
+Wer das Display in der Fensterpause einschaltet, heizt trotz offenem Fenster (``window_override``): Die Pause
+endet, Betriebsart und Ziel bleiben, und erst wenn alle Fenster zu sind, pausiert die nächste Öffnung wieder.
+Hat das Display neben ``system_mode`` ein eigenes ``preset`` (Beok: manual/eco/auto), ist Eco am Display die
+Betriebsart Eco des Raums und umgekehrt; das Gerät regelt dann nach seiner Eco-Temperatur, die Haven gleich der
+Eco-Temperatur des Raums hält. Zurück auf Manuell am Display heißt ``heat`` mit dem gemeldeten Sollwert. Den
+eigenen Wochenplan des Geräts (``auto``) stellt Haven auf Manuell bzw. Eco zurück, Haven hat den Plan. Bei
+Displays mit Modus über ``preset`` wird ``auto``/Wochenplan ignoriert. Seine Messung zählt wie ein
+Raumthermometer (Quelle ``display``, wenn sonst kein Thermometer gilt).
+
 Ablauf je Auswertung (Zeitgeber, TRV-Meldung, Sensor-Änderung)::
 
     state, events = observe(options, state, inputs)   # Fenster, Sommer, Änderungen am Gerät übernehmen
@@ -114,6 +128,7 @@ def default_options() -> dict[str, Any]:
         "presets": dict(DEFAULT_PRESETS),
         "lock_manual": False,
         "calibrate_released": True,  # freigegebene TRVs weiter kalibrieren
+        "display": None,  # IEEE eines als Display markierten Wandthermostats (Bedienung des Raums)
     }
 
 
@@ -130,6 +145,8 @@ def normalize_options(doc: Any) -> dict[str, Any]:
             out[key] = []
     if isinstance(out["outdoor"], dict):
         out["outdoor"] = {"threshold": DEFAULT_OUTDOOR_THRESHOLD, **out["outdoor"]}
+    if not (isinstance(out["display"], str) and out["display"]):
+        out["display"] = None
     out["area_id"] = src.get("area_id")
     return out
 
@@ -191,6 +208,12 @@ def validate_shape(doc: Any) -> list[str]:
     for key in ("lock_manual", "calibrate_released"):
         if key in doc and not isinstance(doc[key], bool):
             errors.append(f"{key} muss wahr oder falsch sein")
+    display = doc.get("display")
+    if display is not None:
+        if not (isinstance(display, str) and display):
+            errors.append("display muss ein Thermostat (IEEE) oder leer sein")
+        elif isinstance(trvs, list) and display in trvs:
+            errors.append("display darf nicht zugleich unter trvs stehen")
     return errors
 
 
@@ -200,11 +223,13 @@ def validate_config(
     *,
     thermostats: dict[str, str] | None = None,
     known_areas: set[str] | None = None,
+    displays: set[str] | None = None,
 ) -> dict[str, Any]:
     """Prüft und normalisiert eine Raumregelung. Fehler als :class:`Z2MError` ``invalid_format``/``device_taken``.
 
     ``thermostats``: IEEE -> Name aller Zigbee-Thermostate (``None`` = Geräteliste noch nicht da, nicht prüfen).
-    Ein TRV gehört höchstens zu einem Raum.
+    ``displays``: als Display markierte Thermostate (``None`` = nicht prüfen). Ein TRV gehört höchstens zu einem
+    Raum, ein Display ebenso; ein markiertes Display ist nie ein TRV.
     """
     errors = validate_shape(doc)
     if errors:
@@ -217,13 +242,25 @@ def validate_config(
         for ieee in config["trvs"]:
             if ieee not in thermostats:
                 raise Z2MError("not_found", f"{ieee} ist kein bekanntes Thermostat")
+
+    def name(ieee: str) -> str:
+        return (thermostats or {}).get(ieee) or ieee
+
+    display = config["display"]
+    if displays is not None:
+        for ieee in config["trvs"]:
+            if ieee in displays:
+                raise Z2MError("device_taken", f"{name(ieee)} ist als Display markiert und kein Heizkörperthermostat")
+        if display is not None and display not in displays:
+            raise Z2MError("invalid_format", f"{name(display)} ist nicht als Display markiert")
     for other_area, other in configs.items():
         if other_area == area:
             continue
         taken = set(other.get("trvs", [])) & set(config["trvs"])
         if taken:
-            name = (thermostats or {}).get(next(iter(taken))) or next(iter(taken))
-            raise Z2MError("device_taken", f"{name} wird schon in einem anderen Raum geregelt")
+            raise Z2MError("device_taken", f"{name(next(iter(taken)))} wird schon in einem anderen Raum geregelt")
+        if display is not None and other.get("display") == display:
+            raise Z2MError("device_taken", f"{name(display)} ist schon das Display eines anderen Raums")
     return config
 
 
@@ -249,6 +286,15 @@ class TrvCaps:
     boost_values: tuple[str, ...] = ()  # davon nur kurz (Ventil offen)
     comfort_temp: str | None = None  # Komfort-Temperatur am Gerät (Regelmodus ``comfort``)
     hysteresis: str | None = None  # Ventilverhalten, ``comfort`` = stufenlos
+    # Nur Displays mit Ein/Aus über ``system_mode`` und eigenem ``preset`` (siehe :func:`display_caps`)
+    preset_prop: str | None = None
+    preset_manual: str | None = None
+    preset_eco: str | None = None
+    preset_self: tuple[str, ...] = ()  # eigener Wochenplan des Geräts (Haven stellt zurück)
+    eco_temp_prop: str | None = None  # Eco-Temperatur am Gerät (gilt im Preset Eco statt des Sollwerts)
+    eco_min: float = 5.0
+    eco_max: float = 30.0
+    eco_step: float = 0.5
 
 
 def _flatten(exposes: Any) -> list[dict[str, Any]]:
@@ -317,6 +363,46 @@ def trv_caps(exposes: Any) -> TrvCaps:
     return caps
 
 
+def display_caps(exposes: Any) -> TrvCaps:
+    """Fähigkeiten eines Displays: wie :func:`trv_caps`, aber Ein/Aus über ``system_mode``, wenn der
+    Regelmodus sonst kein Aus kennt (Tuya-Wandthermostate: ``preset`` manual/auto, ``system_mode`` heat/off)."""
+    caps = trv_caps(exposes)
+    if caps.off_value is not None:
+        return caps
+    system = {e.get("property"): e for e in _flatten(exposes) if e.get("property")}.get("system_mode")
+    values = [str(v) for v in (system or {}).get("values") or []]
+    if system is not None and _writable(system) and "heat" in values and "off" in values:
+        caps.mode_prop, caps.on_value, caps.off_value = "system_mode", "heat", "off"
+        caps.release_values = tuple(v for v in values if v in _SELF_CONTROL)
+        caps.boost_values = tuple(v for v in caps.release_values if v in _BOOST)
+        caps.comfort_temp = None
+    if caps.mode_prop == "system_mode":
+        _display_presets(caps, exposes)
+    return caps
+
+
+# Werte des ``preset`` eines Displays, mit denen es nach eigenem Wochenplan regelt
+_DISPLAY_SELF = ("auto", "schedule", "program")
+
+
+def _display_presets(caps: TrvCaps, exposes: Any) -> None:
+    """Preset eines Displays neben ``system_mode`` (Beok: manual/eco/auto) und dessen Eco-Temperatur."""
+    by = {e.get("property"): e for e in _flatten(exposes) if e.get("property")}
+    preset = by.get("preset")
+    values = [str(v) for v in (preset or {}).get("values") or []]
+    if preset is None or not _writable(preset) or "manual" not in values:
+        return
+    caps.preset_prop, caps.preset_manual = "preset", "manual"
+    caps.preset_eco = "eco" if "eco" in values else None
+    caps.preset_self = tuple(v for v in values if v in _DISPLAY_SELF)
+    eco = by.get("eco_temperature")
+    if caps.preset_eco and eco is not None and _writable(eco) and eco.get("type", "numeric") == "numeric":
+        caps.eco_temp_prop = "eco_temperature"
+        caps.eco_min = float(eco.get("value_min", caps.eco_min))
+        caps.eco_max = float(eco.get("value_max", caps.eco_max))
+        caps.eco_step = float(eco.get("value_step", caps.eco_step) or caps.eco_step)
+
+
 @dataclass
 class TrvReading:
     """Letzter Zustand eines TRV (aus der Z2M-Meldung)."""
@@ -330,6 +416,9 @@ class TrvReading:
     available: bool = True
     comfort_temp: float | None = None
     hysteresis: str | None = None
+    preset: str | None = None  # nur Displays mit eigenem Preset (``caps.preset_prop``)
+    eco_temp: float | None = None
+    battery: int | None = None
 
 
 def _num(v: Any) -> float | None:
@@ -350,6 +439,7 @@ def trv_reading(values: dict[str, Any] | None, caps: TrvCaps, *, available: bool
     v = values or {}
     running = v.get("running_state")
     valve = _num(v.get("position", v.get("valve_position", v.get("pi_heating_demand"))))
+    battery = _num(v.get("battery"))
     return TrvReading(
         local=_num(v.get("local_temperature")),
         setpoint=_num(v.get(caps.setpoint)),
@@ -360,6 +450,9 @@ def trv_reading(values: dict[str, Any] | None, caps: TrvCaps, *, available: bool
         available=available,
         comfort_temp=_num(v.get(caps.comfort_temp)) if caps.comfort_temp else None,
         hysteresis=str(v[caps.hysteresis]) if caps.hysteresis and v.get(caps.hysteresis) is not None else None,
+        preset=str(v[caps.preset_prop]) if caps.preset_prop and v.get(caps.preset_prop) is not None else None,
+        eco_temp=_num(v.get(caps.eco_temp_prop)) if caps.eco_temp_prop else None,
+        battery=None if battery is None else round(battery),
     )
 
 
@@ -379,6 +472,7 @@ class HeatingInputs:
     sensors: dict[str, float | None] = field(default_factory=dict)
     windows: dict[str, bool | None] = field(default_factory=dict)
     outdoor: float | None = None
+    display: TrvInput | None = None  # Display des Raums (``options["display"]``)
 
 
 # --- Zustand -------------------------------------------------------------------------------
@@ -413,6 +507,12 @@ class TrvMemo:
     release_until: float | None = None  # Ventil offen: so lange, dann übernimmt Haven wieder
     sent_comfort_at: float | None = None
     sent_hysteresis_at: float | None = None
+    # nur Displays: Preset und Eco-Temperatur
+    seen_preset: str | None = None
+    sent_preset: str | None = None
+    sent_preset_at: float | None = None
+    sent_eco_temp: float | None = None
+    sent_eco_temp_at: float | None = None
 
 
 @dataclass
@@ -423,10 +523,13 @@ class HeatingState:
     window_open_since: float | None = None
     window_closed_since: float | None = None
     paused: bool = False
+    window_override: bool = False  # am Display trotz offenem Fenster eingeschaltet: keine Pause, bis alle zu sind
     summer: bool = False
     outdoor_ema: float | None = None
     outdoor_at: float | None = None
     trvs: dict[str, TrvMemo] = field(default_factory=dict)
+    display: TrvMemo | None = None  # was Haven über das Display weiß (gilt für ``display_ieee``)
+    display_ieee: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -435,22 +538,32 @@ class HeatingState:
     def from_dict(cls, data: Any) -> HeatingState:
         if not isinstance(data, dict):
             return cls()
-        known = {f for f in cls.__dataclass_fields__ if f != "trvs"}
+        known = {f for f in cls.__dataclass_fields__ if f not in ("trvs", "display")}
         state = cls(**{k: v for k, v in data.items() if k in known})
         if state.mode not in MODES:
             state.mode = "heat"
         if not _is_num(state.target):
             state.target = DEFAULT_TARGET
+        state.window_override = state.window_override is True
         memo_fields = set(TrvMemo.__dataclass_fields__)
         trvs = data.get("trvs") if isinstance(data.get("trvs"), dict) else {}
         state.trvs = {
             ieee: TrvMemo(**{k: v for k, v in m.items() if k in memo_fields}) for ieee, m in trvs.items() if isinstance(m, dict)
         }
+        display = data.get("display")
+        if isinstance(display, dict) and isinstance(state.display_ieee, str):
+            state.display = TrvMemo(**{k: v for k, v in display.items() if k in memo_fields})
+        else:
+            state.display, state.display_ieee = None, None
         return state
 
 
 def _copy(state: HeatingState) -> HeatingState:
-    return replace(state, trvs={k: replace(v) for k, v in state.trvs.items()})
+    return replace(
+        state,
+        trvs={k: replace(v) for k, v in state.trvs.items()},
+        display=replace(state.display) if state.display is not None else None,
+    )
 
 
 def clamp_target(v: float) -> float:
@@ -469,11 +582,29 @@ def _same(a: float | None, b: float | None) -> bool:
 # --- Abgeleitete Werte -------------------------------------------------------------------------
 
 
+# Quellen der Raumtemperatur, nach denen die TRVs korrigiert werden (nicht deren eigene Messung)
+ROOM_SOURCES = ("sensors", "display")
+
+
+def display_temperature(inputs: HeatingInputs) -> float | None:
+    """Messung des Displays, wenn es erreichbar ist und sie plausibel ist."""
+    d = inputs.display
+    if d is None or not d.reading.available or d.reading.local is None:
+        return None
+    return d.reading.local if -30 <= d.reading.local <= 60 else None
+
+
 def room_temperature(inputs: HeatingInputs) -> tuple[float | None, str | None]:
-    """Mittel der gültigen Raumthermometer, sonst Mittel der TRV-Messungen. ``(Wert, Quelle)``."""
+    """Mittel der gültigen Raumthermometer (das Display zählt mit), sonst Mittel der TRV-Messungen.
+    ``(Wert, Quelle)``: ``sensors`` mit mindestens einem Thermometer, ``display`` nur mit dem Display, ``trv``."""
     values = [v for v in inputs.sensors.values() if v is not None]
+    display = display_temperature(inputs)
     if values:
+        if display is not None:
+            values.append(display)
         return round(sum(values) / len(values), 2), "sensors"
+    if display is not None:
+        return round(display, 2), "display"
     locals_ = [t.reading.local for t in inputs.trvs.values() if t.reading.available and t.reading.local is not None]
     if locals_:
         return round(sum(locals_) / len(locals_), 2), "trv"
@@ -514,7 +645,7 @@ def raw_temperature(r: TrvReading, memo: TrvMemo | None) -> float | None:
 
 def method_for(options: dict[str, Any], caps: TrvCaps, room_source: str | None) -> str:
     """Korrektur, die bei diesem TRV wirklich greift."""
-    if room_source != "sensors":
+    if room_source not in ROOM_SOURCES:
         return "none"
     method = options.get("calibration", "offset")
     if method == "offset" and caps.calibration is None:
@@ -532,17 +663,25 @@ def observe(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
     events: list[str] = []
     room, source = room_temperature(inputs)
 
-    # Fenster: Pause nach Verzögerung, Weiter nach Verzögerung (unbekannt zählt als zu)
+    # Fenster: Pause nach Verzögerung, Weiter nach Verzögerung (unbekannt zählt als zu). Am Display trotz
+    # offenem Fenster eingeschaltet (``window_override``): keine Pause, bis alle Fenster zu sind.
     open_any = any(v is True for v in inputs.windows.values())
     if open_any:
         new.window_closed_since = None
         if new.window_open_since is None:
             new.window_open_since = now
-        if not new.paused and now - new.window_open_since >= options.get("window_open_delay", 0):
+        if (
+            not new.paused
+            and not new.window_override
+            and now - new.window_open_since >= options.get("window_open_delay", 0)
+        ):
             new.paused = True
             events.append("window_pause")
     else:
         new.window_open_since = None
+        if new.window_override:
+            new.window_override = False
+            events.append("window_override_end")
         if new.paused:
             if new.window_closed_since is None:
                 new.window_closed_since = now
@@ -610,7 +749,7 @@ def observe(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
             memo.seen_valve = r.valve
         # Abweichung Raum − TRV geglättet (nicht, solange eine neue Kalibrierung noch nicht gemessen ist)
         raw = raw_temperature(r, memo)
-        if source == "sensors" and room is not None and raw is not None and r.available and memo.cal_changed_at is None:
+        if source in ROOM_SOURCES and room is not None and raw is not None and r.available and memo.cal_changed_at is None:
             corr = room - raw
             if memo.corr_ema is None or memo.corr_at is None or now - memo.corr_at > 8 * CAL_TAU:
                 memo.corr_ema = corr
@@ -662,7 +801,141 @@ def observe(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
             memo.seen_mode = r.mode
     for gone in [k for k in new.trvs if k not in inputs.trvs]:
         new.trvs.pop(gone)
+    _observe_display(options, new, inputs, events)
+    if new.mode == "off" and new.window_override:
+        new.window_override = False  # Raum aus: die nächste Öffnung pausiert wieder
+        events.append("window_override_end")
     return new, events
+
+
+def _display(options: dict[str, Any], inputs: HeatingInputs) -> tuple[str, TrvInput] | None:
+    """``(IEEE, Eingang)`` des Displays, wenn der Raum eines hat und es gemeldet ist."""
+    ieee = options.get("display")
+    if not ieee or inputs.display is None:
+        return None
+    return ieee, inputs.display
+
+
+def _observe_display(options: dict[str, Any], new: HeatingState, inputs: HeatingInputs, events: list[str]) -> None:
+    """Bedienung am Display übernehmen: Sollwert -> Ziel des Raums, Aus/Ein/Preset -> Betriebsart.
+
+    Gilt auch mit ``lock_manual`` und in Fenster- oder Sommerpause (das Display ist die Bedienung des Raums).
+    Eigene Befehle erkennt Haven an ``sent_*``; eine Bestätigung verbraucht sie, damit ein späteres Zurückdrehen
+    auf denselben Wert wieder als Bedienung zählt.
+
+    Fensterpause: Haven schaltet das Display aus. Ein Aus in der Pause ist keine Bedienung. Schaltet es jemand
+    ein, heißt das „trotzdem heizen“: Pause zu Ende, ``window_override`` bis alle Fenster zu sind (Betriebsart und
+    Ziel bleiben, nur aus Aus wird ``heat``).
+
+    Preset (``caps.preset_prop``): Eco am Display -> Betriebsart Eco, von Eco zurück auf Manuell -> ``heat`` mit
+    dem gemeldeten Sollwert. Der eigene Wochenplan (``preset_self``) wird nicht übernommen, Haven stellt ihn zurück.
+    In Eco und im Wochenplan zählt ein neuer Sollwert nicht (das Gerät zeigt dann seine Eco-Temperatur bzw. die
+    des Plans), eine Eco-Temperatur am Gerät auch nicht (Haven stellt die des Raums wieder ein).
+    """
+    found = _display(options, inputs)
+    if found is None:
+        new.display, new.display_ieee = None, None
+        return
+    ieee, disp = found
+    if new.display is None or new.display_ieee != ieee:
+        new.display, new.display_ieee = TrvMemo(), ieee
+    memo, r, caps, now = new.display, disp.reading, disp.caps, inputs.now
+    enabled = options.get("enabled", True)
+    first = memo.seen_setpoint is None and memo.seen_mode is None
+    mode_changed = r.mode is not None and memo.seen_mode is not None and r.mode != memo.seen_mode
+    sp_changed = r.setpoint is not None and memo.seen_setpoint is not None and not _same(r.setpoint, memo.seen_setpoint)
+    preset_changed = r.preset is not None and memo.seen_preset is not None and r.preset != memo.seen_preset
+    is_off = caps.mode_prop is not None and caps.off_value is not None and r.mode == caps.off_value
+    if r.local is not None:
+        memo.seen_local = r.local
+    mode_adopted = False
+    if mode_changed and r.mode == memo.sent_mode and _recent(memo.sent_mode_at, now):
+        memo.sent_mode = None  # Bestätigung des eigenen Befehls
+    elif mode_changed and not first and enabled and r.mode not in caps.release_values:
+        adopted: str | None = None
+        if r.mode == caps.off_value:
+            # in der Fensterpause soll das Display aus sein: das ist kein Ausschalten des Raums
+            adopted = None if new.paused else "off"
+        elif r.mode == caps.on_value:
+            adopted = "heat" if new.mode == "off" or new.mode in PRESET_MODES else None
+            if new.paused and memo.seen_mode == caps.off_value:
+                # trotz Fensterpause eingeschaltet: heizen, bis alle Fenster zu sind
+                if new.mode != "off":
+                    adopted = None
+                new.paused = False
+                new.window_closed_since = None
+                new.window_override = any(v is True for v in inputs.windows.values())
+                events.append("display_window_override")
+                mode_adopted = True
+        else:
+            adopted = _PRESET_TO_MODE.get(str(r.mode).lower())
+        if adopted is not None and adopted != new.mode:
+            new.mode = adopted
+            new.changed_at = now
+            events.append(f"display_mode:{adopted}")
+        mode_adopted = mode_adopted or adopted is not None
+    preset_adopted = False
+    if preset_changed and r.preset == memo.sent_preset and _recent(memo.sent_preset_at, now):
+        memo.sent_preset = None  # Bestätigung des eigenen Befehls
+    elif preset_changed and not first and enabled and not is_off and not mode_adopted:
+        if r.preset == caps.preset_eco:
+            if new.mode != "eco":
+                new.mode = "eco"
+                new.changed_at = now
+                events.append("display_mode:eco")
+            preset_adopted = True
+        elif r.preset == caps.preset_manual and memo.seen_preset == caps.preset_eco:
+            adopted_t = clamp_target(r.setpoint) if r.setpoint is not None else new.target
+            if new.mode != "heat":
+                new.mode = "heat"
+                new.changed_at = now
+                events.append("display_mode:heat")
+            if not _same(adopted_t, new.target):
+                new.target = adopted_t
+                new.changed_at = now
+                events.append(f"display_target:{adopted_t}")
+            preset_adopted = True
+    if r.eco_temp is not None and _same(r.eco_temp, memo.sent_eco_temp):
+        memo.sent_eco_temp = None  # bestätigt; eine spätere Änderung am Gerät stellt Haven sofort zurück
+    preset_holds = caps.preset_prop is not None and r.preset is not None and (
+        r.preset == caps.preset_eco or r.preset in caps.preset_self
+    )
+    echo = _recent(memo.sent_setpoint_at, now) and (
+        _same(r.setpoint, memo.sent_setpoint) or _same(r.setpoint, memo.prev_sent_setpoint)
+    )
+    if sp_changed and echo:
+        # Bestätigung (auch eine späte des vorigen Werts)
+        if _same(r.setpoint, memo.sent_setpoint):
+            memo.sent_setpoint = None
+        memo.prev_sent_setpoint = None
+    elif (
+        sp_changed
+        and not first
+        and not mode_adopted
+        and not preset_adopted
+        and not preset_holds
+        and enabled
+        and not is_off
+        and not (memo.sent_mode_at is not None and now - memo.sent_mode_at < MODE_SETTLE)
+        and not (memo.sent_preset_at is not None and now - memo.sent_preset_at < MODE_SETTLE)
+    ):
+        adopted_t = clamp_target(r.setpoint)
+        if new.mode != "heat" or not _same(adopted_t, new.target):
+            new.mode = "heat"
+            new.target = adopted_t
+            new.changed_at = now
+            events.append(f"display_target:{adopted_t}")
+    if r.setpoint is not None:
+        memo.seen_setpoint = r.setpoint
+    if r.mode is not None:
+        memo.seen_mode = r.mode
+    if r.preset is not None:
+        memo.seen_preset = r.preset
+
+
+def _recent(at: float | None, now: float) -> bool:
+    """Eigener Befehl so frisch, dass eine passende Meldung seine Bestätigung ist."""
+    return at is not None and now - at < 2 * RESEND
 
 
 def _resume(memo: TrvMemo) -> None:
@@ -673,7 +946,7 @@ def next_wake(options: dict[str, Any], state: HeatingState) -> float | None:
     """Nächster Zeitpunkt, zu dem sich ohne neue Meldung etwas ändert (Fenster-Verzögerungen, Ende einer
     Freigabe mit offenem Ventil)."""
     times = [m.release_until for m in state.trvs.values() if m.released_at is not None and m.release_until is not None]
-    if state.window_open_since is not None and not state.paused:
+    if state.window_open_since is not None and not state.paused and not state.window_override:
         times.append(state.window_open_since + options.get("window_open_delay", 0))
     if state.paused and state.window_closed_since is not None:
         times.append(state.window_closed_since + options.get("window_close_delay", 0))
@@ -711,7 +984,7 @@ def desired(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs)
         if p.released and not options.get("calibrate_released", True) and p.method == "offset":
             p.method = "none"  # freigegeben ohne Kalibrierung: eigene zurücknehmen (unten)
         raw = raw_temperature(r, memo)
-        if room is not None and raw is not None and source == "sensors":
+        if room is not None and raw is not None and source in ROOM_SOURCES:
             p.correction = round(room - raw, 2)
         if p.method == "offset" and p.correction is not None:
             # Gedämpft: geglättete Abweichung, je Schritt höchstens CAL_MAX_STEP (der erste Schritt voll)
@@ -822,7 +1095,90 @@ def plan(
                 memo.sent_hysteresis_at = now
         if values:
             commands[ieee] = values
+    found = _display(options, inputs)
+    if found is not None:
+        ieee, disp = found
+        if new.display is None or new.display_ieee != ieee:
+            new.display, new.display_ieee = TrvMemo(), ieee
+        if values := _plan_display(options, new, disp, now):
+            commands[ieee] = values
     return new, commands
+
+
+@dataclass
+class DisplayPlan:
+    """Sollzustand des Displays, ``None`` = nicht stellen."""
+
+    mode: str | None = None
+    setpoint: float | None = None
+    preset: str | None = None
+    eco_temp: float | None = None
+
+
+def display_desired(options: dict[str, Any], state: HeatingState, disp: TrvInput) -> DisplayPlan:
+    """Sollzustand des Displays.
+
+    Aus bei Betriebsart Aus und in der Fensterpause (nur, wenn das Gerät ein Aus hat), die Sommerpause lässt es an.
+    Steht das Display auf eigener Steuerung (``release_values``), bleibt sein Modus. Sollwert = wirksames Ziel des
+    Raums (Eco/Abwesend mit ihrer Temperatur), auf den Schritt des Geräts gerundet, in dessen Grenzen; keiner bei Aus.
+
+    Mit eigenem Preset (``caps.preset_prop``): Eco, wenn der Raum auf Eco steht und das Gerät Eco kennt, sonst
+    Manuell (auch gegen den eigenen Wochenplan); kein Preset, solange es aus ist. In Eco regelt das Gerät nach seiner
+    Eco-Temperatur, dann kein Sollwert. Die Eco-Temperatur ist immer die Eco-Temperatur des Raums.
+    """
+    caps, r = disp.caps, disp.reading
+    target = effective_target(options, state)
+    off = target is None or (state.paused and caps.off_value is not None)
+    out = DisplayPlan()
+    if caps.mode_prop and r.mode not in caps.release_values:
+        out.mode = caps.off_value if off else caps.on_value
+    if caps.preset_prop and not off:
+        out.preset = caps.preset_eco if state.mode == "eco" and caps.preset_eco else caps.preset_manual
+    if caps.eco_temp_prop:
+        eco = float((options.get("presets") or DEFAULT_PRESETS).get("eco", DEFAULT_PRESETS["eco"]))
+        out.eco_temp = min(caps.eco_max, max(caps.eco_min, _round_step(eco, caps.eco_step)))
+    if not off and target is not None and (out.preset is None or out.preset == caps.preset_manual):
+        out.setpoint = min(caps.max, max(caps.min, _round_step(target, caps.step)))
+    return out
+
+
+def _plan_display(options: dict[str, Any], state: HeatingState, disp: TrvInput, now: float) -> dict[str, Any]:
+    """Befehle an das Display (nie Kalibrierung, Komfort-Temperatur oder Ventilverhalten)."""
+    caps, r, memo = disp.caps, disp.reading, state.display
+    if not r.available or memo is None:
+        return {}
+    want = display_desired(options, state, disp)
+    values: dict[str, Any] = {}
+    if caps.mode_prop and want.mode is not None and r.mode != want.mode:
+        waiting = want.mode == memo.sent_mode and memo.sent_mode_at is not None and now - memo.sent_mode_at < RESEND
+        if not waiting:
+            values[caps.mode_prop] = want.mode
+            memo.sent_mode, memo.sent_mode_at = want.mode, now
+    if caps.preset_prop and want.preset is not None and r.preset != want.preset:
+        waiting = want.preset == memo.sent_preset and memo.sent_preset_at is not None and now - memo.sent_preset_at < RESEND
+        if not waiting:
+            values[caps.preset_prop] = want.preset
+            memo.sent_preset, memo.sent_preset_at = want.preset, now
+    if want.setpoint is not None and not _same(r.setpoint, want.setpoint):
+        waiting = (
+            _same(want.setpoint, memo.sent_setpoint)
+            and memo.sent_setpoint_at is not None
+            and now - memo.sent_setpoint_at < RESEND
+        )
+        if not waiting:
+            values[caps.setpoint] = want.setpoint
+            memo.prev_sent_setpoint = memo.sent_setpoint
+            memo.sent_setpoint, memo.sent_setpoint_at = want.setpoint, now
+    if caps.eco_temp_prop and want.eco_temp is not None and not _same(r.eco_temp, want.eco_temp):
+        waiting = (
+            _same(want.eco_temp, memo.sent_eco_temp)
+            and memo.sent_eco_temp_at is not None
+            and now - memo.sent_eco_temp_at < RESEND
+        )
+        if not waiting:
+            values[caps.eco_temp_prop] = want.eco_temp
+            memo.sent_eco_temp, memo.sent_eco_temp_at = want.eco_temp, now
+    return values
 
 
 # --- Status -------------------------------------------------------------------------------------
@@ -862,6 +1218,32 @@ def status(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) 
                 "release_until": (state.trvs.get(ieee) or TrvMemo()).release_until if p.released else None,
             }
         )
+    display = None
+    if (found := _display(options, inputs)) is not None:
+        ieee, disp = found
+        r, caps = disp.reading, disp.caps
+        want = display_desired(options, state, disp)
+        pending = False
+        if r.available and options.get("enabled", True):
+            pending = (
+                (want.mode is not None and caps.mode_prop is not None and r.mode != want.mode)
+                or (want.setpoint is not None and r.setpoint is not None and abs(r.setpoint - want.setpoint) >= caps.step)
+                or (want.preset is not None and r.preset is not None and r.preset != want.preset)
+                or (want.eco_temp is not None and r.eco_temp is not None and abs(r.eco_temp - want.eco_temp) >= caps.eco_step)
+            )
+        display = {
+            "ieee": ieee,
+            "name": disp.name,
+            "available": r.available,
+            "local_temperature": r.local,
+            "setpoint": r.setpoint,
+            "mode": r.mode,
+            "preset": r.preset,
+            "eco_temperature": r.eco_temp,
+            "battery": r.battery,
+            "pending": pending,
+        }
+    # nur die TRVs: das Display meldet zwar running_state, heizt aber nicht selbst
     heating_flags = [t["heating"] for t in trvs if t["heating"] is not None]
     outdoor = options.get("outdoor")
     window_open = any(v is True for v in inputs.windows.values())
@@ -880,8 +1262,9 @@ def status(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) 
         "window": {
             "open": window_open,
             "paused": state.paused,
+            "override": state.window_override,
             "pause_at": state.window_open_since + options.get("window_open_delay", 0)
-            if state.window_open_since is not None and not state.paused
+            if state.window_open_since is not None and not state.paused and not state.window_override
             else None,
             "resume_at": state.window_closed_since + options.get("window_close_delay", 0)
             if state.paused and state.window_closed_since is not None
@@ -898,6 +1281,7 @@ def status(options: dict[str, Any], state: HeatingState, inputs: HeatingInputs) 
             "summer": state.summer,
         },
         "trvs": trvs,
+        "display": display,
     }
 
 
@@ -916,6 +1300,8 @@ def control(state: HeatingState, *, target: Any = None, mode: Any = None, now: f
         if mode not in MODES:
             raise Z2MError("invalid_format", "mode muss heat, comfort, eco, away oder off sein")
         new.mode = mode
+        if mode == "off":
+            new.window_override = False
     if target is not None:
         if not _is_num(target) or not TARGET_MIN <= target <= TARGET_MAX:
             raise Z2MError("invalid_format", "target muss zwischen 5 und 30 °C liegen")
@@ -962,7 +1348,16 @@ STORE_VERSION = 1
 
 
 def empty_store() -> dict[str, Any]:
-    return {"rooms": {}, "state": {}}
+    return {"rooms": {}, "state": {}, "displays": []}
+
+
+def read_displays(value: Any) -> list[str]:
+    """Als Display markierte Thermostate: nur nicht leere Zeichenketten, ohne Doppelte, Reihenfolge bleibt."""
+    out: list[str] = []
+    for v in value if isinstance(value, list) else []:
+        if isinstance(v, str) and v and v not in out:
+            out.append(v)
+    return out
 
 
 def read_store(data: Any) -> dict[str, Any]:
@@ -972,6 +1367,10 @@ def read_store(data: Any) -> dict[str, Any]:
     rooms = data.get("rooms")
     if isinstance(rooms, dict):
         out["rooms"] = {k: normalize_options({**v, "area_id": k}) for k, v in rooms.items() if isinstance(v, dict)}
+    out["displays"] = read_displays(data.get("displays"))
+    for room in out["rooms"].values():
+        if room["display"] is not None and (room["display"] not in out["displays"] or room["display"] in room["trvs"]):
+            room["display"] = None  # nicht (mehr) markiert
     st = data.get("state")
     if isinstance(st, dict):
         out["state"] = {k: v for k, v in st.items() if isinstance(v, dict) and k in out["rooms"]}

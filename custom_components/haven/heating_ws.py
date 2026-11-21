@@ -19,7 +19,7 @@ from .heating_runtime import get_heating
 
 @callback
 def async_register_heating_commands(hass: HomeAssistant) -> None:
-    for command in (ws_heating_list, ws_heating_set, ws_heating_delete, ws_heating_control):
+    for command in (ws_heating_list, ws_heating_set, ws_heating_delete, ws_heating_control, ws_heating_display):
         websocket_api.async_register_command(hass, command)
 
 
@@ -28,7 +28,10 @@ def async_register_heating_commands(hass: HomeAssistant) -> None:
 async def ws_heating_list(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
     runner = get_heating(hass)
     await runner.async_load()
-    connection.send_result(msg["id"], {"rooms": runner.list_public(), "running": runner.bridge is not None})
+    connection.send_result(
+        msg["id"],
+        {"rooms": runner.list_public(), "running": runner.bridge is not None, "displays": list(runner.displays)},
+    )
 
 
 @websocket_api.require_admin
@@ -82,3 +85,21 @@ async def ws_heating_control(hass: HomeAssistant, connection: websocket_api.Acti
         connection.send_error(msg["id"], err.code, err.message)
         return
     connection.send_result(msg["id"], {"ok": True, "status": status})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "haven/heating/display", vol.Required("ieee"): str, vol.Required("display"): bool}
+)
+@websocket_api.async_response
+async def ws_heating_display(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Thermostat als reines Display markieren (``display: true``) oder die Markierung aufheben."""
+    runner = get_heating(hass)
+    await runner.async_load()
+    try:
+        result = await runner.async_display(msg["ieee"], msg["display"])
+    except Z2MError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+        return
+    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("heating"))
+    connection.send_result(msg["id"], {"ok": True, **result})

@@ -2,7 +2,8 @@
 
 Die Logik liegt HA-frei in ``heating.py``. Hier passiert nur:
 
-- Store ``.storage/haven.heating`` (Einstellungen je Raum und der Zustand: Ziel, Betriebsart, Gesendetes),
+- Store ``.storage/haven.heating`` (Einstellungen je Raum, der Zustand: Ziel, Betriebsart, Gesendetes, und die
+  als Display markierten Thermostate),
 - Eingänge sammeln: TRV-Zustände aus den Z2M-Meldungen (über die Bridge), Raumthermometer, Fensterkontakte
   und Außentemperatur aus HA-Zuständen (State-Abos),
 - Auswerten bei jeder Änderung, alle 2 Minuten und zu den Fenster-Verzögerungen (``async_call_later``),
@@ -52,6 +53,7 @@ class HeatingRunner:
         self._loaded = False
         self.states: dict[str, ht.HeatingState] = {}
         self._caps: dict[str, ht.TrvCaps] = {}
+        self._display_caps: dict[str, ht.TrvCaps] = {}
         self._unsubs: list[Callable[[], None]] = []
         self._timers: dict[str, Callable[[], None]] = {}
         self._tick: Callable[[], None] | None = None
@@ -70,6 +72,11 @@ class HeatingRunner:
     @property
     def configs(self) -> dict[str, dict[str, Any]]:
         return self._data["rooms"]
+
+    @property
+    def displays(self) -> list[str]:
+        """Als Display markierte Thermostate (IEEE)."""
+        return self._data["displays"]
 
     @callback
     def attach(self, bridge: Z2MBridge) -> None:
@@ -139,36 +146,44 @@ class HeatingRunner:
     def _on_bridge(self, kind: str, payload: Any) -> None:
         if kind == "devices":
             self._caps.clear()
+            self._display_caps.clear()
             for area in list(self.configs):
                 self.evaluate(area, "devices")
             return
         if kind == "availability" or kind == "device_state":
             ieee = payload.get("ieee")
             for area, config in self.configs.items():
-                if ieee in config["trvs"]:
+                if ieee in config["trvs"] or (ieee is not None and ieee == config.get("display")):
                     self.evaluate(area, "device")
 
     def caps(self, ieee: str) -> ht.TrvCaps:
         if ieee not in self._caps:
-            device = (self.bridge.devices if self.bridge is not None else {}).get(ieee) or {}
-            self._caps[ieee] = ht.trv_caps((device.get("definition") or {}).get("exposes"))
+            self._caps[ieee] = ht.trv_caps(self._exposes(ieee))
         return self._caps[ieee]
+
+    def display_caps(self, ieee: str) -> ht.TrvCaps:
+        if ieee not in self._display_caps:
+            self._display_caps[ieee] = ht.display_caps(self._exposes(ieee))
+        return self._display_caps[ieee]
+
+    def _exposes(self, ieee: str) -> Any:
+        device = (self.bridge.devices if self.bridge is not None else {}).get(ieee) or {}
+        return (device.get("definition") or {}).get("exposes")
 
     # --- Eingänge ---------------------------------------------------------------------------
 
-    def _inputs(self, config: dict[str, Any], now: float) -> ht.HeatingInputs:
+    def _device_input(self, ieee: str, caps: ht.TrvCaps) -> ht.TrvInput:
         bridge = self.bridge
-        trvs: dict[str, ht.TrvInput] = {}
-        for ieee in config["trvs"]:
-            caps = self.caps(ieee)
-            device = (bridge.devices if bridge is not None else {}).get(ieee)
-            values = bridge.state_cache.states.get(ieee) if bridge is not None else None
-            available = device is not None and (bridge.availability.get(ieee) != "offline" if bridge is not None else False)
-            trvs[ieee] = ht.TrvInput(
-                caps,
-                ht.trv_reading(values, caps, available=available),
-                (device or {}).get("friendly_name") or ieee,
-            )
+        device = (bridge.devices if bridge is not None else {}).get(ieee)
+        values = bridge.state_cache.states.get(ieee) if bridge is not None else None
+        available = device is not None and (bridge.availability.get(ieee) != "offline" if bridge is not None else False)
+        return ht.TrvInput(caps, ht.trv_reading(values, caps, available=available), (device or {}).get("friendly_name") or ieee)
+
+    def _inputs(self, config: dict[str, Any], now: float) -> ht.HeatingInputs:
+        trvs = {ieee: self._device_input(ieee, self.caps(ieee)) for ieee in config["trvs"]}
+        display = None
+        if ieee := config.get("display"):
+            display = self._device_input(ieee, self.display_caps(ieee))
         sensors: dict[str, float | None] = {}
         for entity in config["sensors"]:
             s = self.hass.states.get(entity)
@@ -184,7 +199,7 @@ class HeatingRunner:
             entity = config["outdoor"]["entity"]
             if (s := self.hass.states.get(entity)) is not None:
                 outdoor = ht.outdoor_value(entity.split(".", 1)[0], s.state, dict(s.attributes))
-        return ht.HeatingInputs(now=now, trvs=trvs, sensors=sensors, windows=windows, outdoor=outdoor)
+        return ht.HeatingInputs(now=now, trvs=trvs, sensors=sensors, windows=windows, outdoor=outdoor, display=display)
 
     # --- Auswerten --------------------------------------------------------------------------
 
@@ -206,7 +221,8 @@ class HeatingRunner:
         for event in events:
             _LOGGER.debug("Haven-Heizung %s: %s (%s)", area, event, source)
         for ieee, values in commands.items():
-            name = inputs.trvs[ieee].name
+            device = inputs.trvs.get(ieee) or inputs.display
+            name = device.name if device is not None else ieee
             self.hass.async_create_task(self._async_send(name, values))
         self._schedule_wake(area, config, state)
         status = self.status(area, inputs=inputs)
@@ -266,7 +282,9 @@ class HeatingRunner:
         }
 
     async def async_set(self, doc: dict[str, Any], known_areas: set[str] | None = None) -> dict[str, Any]:
-        config = ht.validate_config(doc, self.configs, thermostats=self._thermostats(), known_areas=known_areas)
+        config = ht.validate_config(
+            doc, self.configs, thermostats=self._thermostats(), known_areas=known_areas, displays=set(self.displays)
+        )
         area = config["area_id"]
         previous = self.configs.get(area)
         self.configs[area] = config
@@ -286,6 +304,35 @@ class HeatingRunner:
         await self._store.async_save(self._data)
         self.sync()
         return True
+
+    async def async_display(self, ieee: str, display: bool) -> dict[str, Any]:
+        """Thermostat als reines Display markieren oder die Markierung aufheben.
+
+        Ein Display regelt Haven nie als TRV, es darf in keinem Raum unter ``trvs`` stehen. Ohne Markierung
+        verliert jeder Raum, der es als Display nutzt, sein Display.
+        """
+        thermostats = self._thermostats()
+        if display:
+            if thermostats is not None and ieee not in thermostats:
+                raise Z2MError("not_found", f"{ieee} ist kein bekanntes Thermostat")
+            if any(ieee in c["trvs"] for c in self.configs.values()):
+                name = (thermostats or {}).get(ieee) or ieee
+                raise Z2MError("device_taken", f"{name} wird als Heizkörperthermostat in einem Raum geregelt")
+            if ieee not in self.displays:
+                self.displays.append(ieee)
+                await self._store.async_save(self._data)
+            return {"displays": list(self.displays)}
+        changed = ieee in self.displays
+        if changed:
+            self.displays.remove(ieee)
+        for config in self.configs.values():
+            if config.get("display") == ieee:
+                config["display"] = None
+                changed = True
+        if changed:
+            await self._store.async_save(self._data)
+            self.sync()
+        return {"displays": list(self.displays)}
 
     @callback
     def _reset_calibration(self, area: str, trvs: list[str]) -> None:

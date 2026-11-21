@@ -325,3 +325,170 @@ def test_open_valve_on_device_is_released_and_resumed_from_app(rig):
     assert status["released"] is False
     assert bridge.published[-1] == ("Heizung Salon", {"preset": "comfort"})
     assert hass.errors == []
+
+
+# --- Display ---------------------------------------------------------------------------------
+
+DISPLAY = "0x00000000000000d1"
+DISPLAY_EXPOSES = [
+    {"type": "climate", "features": [
+        {"property": "current_heating_setpoint", "access": 7, "value_min": 5, "value_max": 35, "value_step": 0.5},
+        {"property": "local_temperature", "access": 1},
+        {"property": "system_mode", "access": 7, "values": ["off", "heat"]},
+        {"property": "preset", "access": 7, "values": ["manual", "auto"]},
+        {"property": "running_state", "access": 1, "values": ["idle", "heat"]},
+        {"property": "local_temperature_calibration", "access": 7, "value_min": -9, "value_max": 9, "value_step": 1},
+    ]},
+]
+
+
+def _with_display(bridge) -> None:
+    bridge.devices[DISPLAY] = {
+        "ieee_address": DISPLAY, "friendly_name": "Wand Salon", "definition": {"exposes": DISPLAY_EXPOSES},
+    }
+    bridge.report(DISPLAY, local_temperature=22.0, current_heating_setpoint=21.0, system_mode="heat", preset="manual",
+                  running_state="heat", local_temperature_calibration=0)
+
+
+def test_display_mark_errors(rig):
+    runtime, clock, hass, bridge, runner = rig
+    _setup(runner, hass, bridge, calibration="none")
+    with pytest.raises(runtime.Z2MError) as err:
+        asyncio.run(runner.async_display("0xunknown", True))
+    assert err.value.code == "not_found"
+    with pytest.raises(runtime.Z2MError) as err:
+        asyncio.run(runner.async_display(TRV_A, True))
+    assert err.value.code == "device_taken" and "Heizung Salon wird als Heizkörperthermostat" in err.value.message
+    # nicht markiert: als Display eines Raums abgelehnt
+    _with_display(bridge)
+    with pytest.raises(runtime.Z2MError) as err:
+        asyncio.run(runner.async_set({"area_id": "salon", "trvs": [TRV_A], "display": DISPLAY}, {"salon"}))
+    assert err.value.code == "invalid_format"
+    # Geräteliste noch nicht da: Markieren ohne Prüfung
+    bridge.devices_received = False
+    assert asyncio.run(runner.async_display("0xlater", True)) == {"displays": ["0xlater"]}
+
+
+def test_display_room_end_to_end(rig):
+    runtime, clock, hass, bridge, runner = rig
+    _with_display(bridge)
+    _setup(runner, hass, bridge, calibration="none")
+    assert asyncio.run(runner.async_display(DISPLAY, True)) == {"displays": [DISPLAY]}
+    assert asyncio.run(runner.async_display(DISPLAY, True)) == {"displays": [DISPLAY]}  # doppelt: bleibt einmal
+    # markiertes Display darf nicht als TRV in einen Raum
+    with pytest.raises(runtime.Z2MError) as err:
+        asyncio.run(runner.async_set({"area_id": "salon", "trvs": [TRV_A, DISPLAY]}, {"salon"}))
+    assert err.value.code == "device_taken"
+    hass.set_state(SENSOR, "unavailable")
+    bridge.published.clear()
+    result = asyncio.run(runner.async_set({"area_id": "salon", "trvs": [TRV_A], "sensors": [SENSOR], "display": DISPLAY}, {"salon"}))
+    hass.drain()
+    assert result["config"]["display"] == DISPLAY
+    status = result["status"]
+    assert status["room_source"] == "display" and status["room_temperature"] == 22.0
+    assert status["display"]["name"] == "Wand Salon" and status["display"]["setpoint"] == 21.0
+    # TRV misst 24, Display 22: TRV wird nach dem Display korrigiert (geglättet), das Display nie kalibriert
+    assert status["trvs"][0]["method"] == "offset" and status["trvs"][0]["correction"] == -2.0
+    assert [n for n, v in bridge.published if "local_temperature_calibration" in v] == ["Heizung Salon"]
+    assert all(name != "Wand Salon" for name, _ in bridge.published)
+    # Drehen am Display: Ziel des Raums, das TRV folgt
+    bridge.published.clear()
+    clock.t += 300
+    bridge.report(DISPLAY, current_heating_setpoint=23.5)
+    hass.drain()
+    assert runner.states["salon"].target == 23.5
+    assert bridge.published == [("Heizung Salon", {"current_heating_setpoint": 23.5})]
+    # Aus am Display: Raum aus
+    clock.t += 60
+    bridge.report(DISPLAY, system_mode="off")
+    hass.drain()
+    assert runner.states["salon"].mode == "off"
+    assert bridge.published[-1] == ("Heizung Salon", {"preset": "off"})
+    # Aus der App wieder an: das Display wird eingeschaltet und zeigt das Ziel
+    bridge.report(TRV_A, preset="off")
+    asyncio.run(runner.async_control("salon", mode="eco"))
+    hass.drain()
+    assert ("Wand Salon", {"system_mode": "heat", "current_heating_setpoint": 18.0}) in bridge.published
+    # Store kennt die Displays
+    assert asyncio.run(runner._store.async_load())["displays"] == [DISPLAY]  # noqa: SLF001
+    assert hass.errors == []
+
+
+def test_display_unmark_removes_it_from_rooms(rig):
+    runtime, clock, hass, bridge, runner = rig
+    _with_display(bridge)
+    _setup(runner, hass, bridge, calibration="none")
+    asyncio.run(runner.async_display(DISPLAY, True))
+    asyncio.run(runner.async_set({"area_id": "salon", "trvs": [TRV_A], "display": DISPLAY}, {"salon"}))
+    hass.drain()
+    assert runner.status("salon")["display"]["ieee"] == DISPLAY
+    assert runner.states["salon"].display_ieee == DISPLAY
+    assert asyncio.run(runner.async_display(DISPLAY, False)) == {"displays": []}
+    hass.drain()
+    assert runner.configs["salon"]["display"] is None
+    assert runner.status("salon")["display"] is None
+    assert runner.states["salon"].display is None
+    saved = asyncio.run(runner._store.async_load())  # noqa: SLF001
+    assert saved["displays"] == [] and saved["rooms"]["salon"]["display"] is None
+    # danach als TRV erlaubt
+    asyncio.run(runner.async_set({"area_id": "salon", "trvs": [TRV_A, DISPLAY]}, {"salon"}))
+    # nicht markiert: Aufheben ist harmlos
+    assert asyncio.run(runner.async_display("0xnichts", False)) == {"displays": []}
+
+
+# Beok BOT-R9V-ZB (Auszug): Ein/Aus über system_mode, preset auto/manual/eco, eigene Eco-Temperatur
+BEOK_EXPOSES = [
+    {"type": "climate", "features": [
+        {"type": "numeric", "property": "current_heating_setpoint", "access": 3, "value_min": 5, "value_max": 60, "value_step": 0.5},
+        {"type": "numeric", "property": "local_temperature", "access": 1},
+        {"type": "enum", "property": "system_mode", "access": 3, "values": ["off", "heat"]},
+        {"type": "enum", "property": "running_state", "access": 1, "values": ["idle", "heat"]},
+        {"type": "enum", "property": "preset", "access": 3, "values": ["auto", "manual", "eco"]},
+    ]},
+    {"type": "numeric", "property": "battery", "access": 1, "value_min": 0, "value_max": 100},
+    {"type": "numeric", "property": "eco_temperature", "access": 3, "value_min": 5, "value_max": 30},
+]
+
+
+def test_display_window_override_end_to_end_and_persisted(rig):
+    runtime, clock, hass, bridge, runner = rig
+    bridge.devices[DISPLAY] = {"ieee_address": DISPLAY, "friendly_name": "Wand Salon", "definition": {"exposes": BEOK_EXPOSES}}
+    bridge.report(DISPLAY, local_temperature=22.0, current_heating_setpoint=21.0, system_mode="heat", preset="manual",
+                  eco_temperature=18, battery=80)
+    _setup(runner, hass, bridge, calibration="none", window_open_delay=60, window_close_delay=120)
+    asyncio.run(runner.async_display(DISPLAY, True))
+    asyncio.run(runner.async_set({"area_id": "salon", "trvs": [TRV_A], "sensors": [SENSOR], "windows": [WINDOW],
+                                  "display": DISPLAY, "calibration": "none", "window_open_delay": 60}, {"salon"}))
+    hass.drain()
+    status = runner.status("salon")
+    assert {k: status["display"][k] for k in ("preset", "eco_temperature", "battery")} == {
+        "preset": "manual", "eco_temperature": 18.0, "battery": 80}
+    # Fenster auf: nach der Verzögerung TRV und Display aus
+    bridge.published.clear()
+    hass.set_state(WINDOW, "on")
+    _advance(hass, clock, 61)
+    assert ("Wand Salon", {"system_mode": "off"}) in bridge.published
+    clock.t += 2
+    bridge.report(DISPLAY, system_mode="off")  # Bestätigung
+    hass.drain()
+    assert runner.states["salon"].mode == "heat"  # eigenes Aus ist kein Raum-Aus
+    assert runner.status("salon")["reason"] == "window"
+    # am Display wieder an: trotzdem heizen, gespeichert
+    clock.t += 30
+    bridge.report(DISPLAY, system_mode="heat")
+    hass.drain()
+    status = runner.status("salon")
+    assert status["reason"] is None and status["window"]["override"] is True and status["window"]["pause_at"] is None
+    saved = asyncio.run(runner._store.async_load())  # noqa: SLF001
+    assert saved["state"]["salon"]["window_override"] is True
+    # nach einem Neustart weiter übersteuert
+    again = runtime.HeatingRunner(hass)
+    again._store.saved = saved  # noqa: SLF001
+    asyncio.run(again.async_load())
+    assert again.states["salon"].window_override is True and again.states["salon"].paused is False
+    # Fenster zu: Übersteuerung vorbei
+    hass.set_state(WINDOW, "off")
+    hass.drain()
+    assert runner.status("salon")["window"]["override"] is False
+    assert asyncio.run(runner._store.async_load())["state"]["salon"]["window_override"] is False  # noqa: SLF001
+    assert hass.errors == []
