@@ -122,7 +122,7 @@ Antwort sofort `result: null`, danach Events (`{"id": N, "type": "event", "event
 - `event`: `{"kind": "event", "event": {"type": "device_joined", "data": {...}}}` (Z2M-Bridge-Event roh)
 
 ## Schreibende Befehle
-Alle Befehle in diesem Abschnitt außer den Lesebefehlen (`state`, `floorplan/get`, `widgets/get`, `prefs/get`, `networkmap` ohne `refresh`) erfordern einen HA-Administrator. Befehle über `bridge/request/...` melden Erfolg erst, wenn Z2M auf `<base>/bridge/response/...` bestätigt hat (Abgleich über das Feld `transaction`, Präfix `haven-`). Timeout 10 s (Netzwerkkarte 10 min). Fehler: `success: false`, `error.code` und deutscher `error.message`. Codes: `timeout`, `z2m_error` (Z2M lehnt ab, Text von Z2M steht in der Meldung), `bridge_offline`, `mqtt_error`, `not_found`, `not_supported`, `name_taken`, `busy`, `invalid_format`, `unauthorized`.
+Alle Befehle in diesem Abschnitt außer den Lesebefehlen (`state`, `floorplan/get`, `widgets/get`, `prefs/get`, `networkmap` ohne `refresh`) erfordern einen HA-Administrator. Befehle über `bridge/request/...` melden Erfolg erst, wenn Z2M auf `<base>/bridge/response/...` bestätigt hat (Abgleich über das Feld `transaction`, Präfix `haven-`). Timeout 10 s (Netzwerkkarte 10 min). Fehler: `success: false`, `error.code` und deutscher `error.message`. Codes: `timeout`, `z2m_error` (Z2M lehnt ab, Text von Z2M steht in der Meldung), `bridge_offline`, `mqtt_error`, `not_found`, `not_supported`, `name_taken`, `busy`, `invalid_format`, `unauthorized`, `conflict` (`base_revision` veraltet, siehe „Revisionen“).
 
 ```json
 {"id": 9, "type": "result", "success": false,
@@ -255,6 +255,19 @@ Z2M kann Szenen nicht von den Lampen zurücklesen. Lampen, die später in die Gr
 
 Ungeprüft auf echtem HA: ob jede Lampe auf `get` auch dann eine Meldung auslöst, wenn sich nichts ändert (sonst `unreachable`), und ob 2 s nach dem Aufruf für lange Übergänge reichen.
 
+### Revisionen: `revision` und `base_revision` (Feature `revisions`)
+Grundriss, Widgets und Prefs tragen eine **Revision**, die nur Haven vergibt: `0` heißt „nie mit Revision gespeichert“, jedes erfolgreiche `set` zählt `+1`. Die `get`-Antworten, die `set`-Antworten und das Ereignis `haven_data_updated` enthalten `revision`.
+
+Ein Client schickt beim `set` optional `base_revision`, die Revision, auf der seine Fassung beruht. Ist sie nicht mehr die gespeicherte (ein anderes Gerät hat inzwischen gespeichert), lehnt Haven mit Code `conflict` ab und speichert nichts. Der Client lädt dann neu, führt zusammen und speichert mit der neuen Revision. Prüfen und Speichern laufen unter einer Sperre, von zwei gleichzeitigen `set` auf derselben Revision gewinnt genau eins. Uhrzeiten der Geräte (`updated_at`) zählen dafür nicht, das Feld wird nur durchgereicht.
+
+Ohne `base_revision` (ältere Apps) speichert Haven wie bisher ohne Prüfung, die Revision steigt trotzdem. So bemerken neuere Geräte die Änderung.
+```
+{"type": "haven/floorplan/get"} → {"plan": {...}, "updated_at": 1763208000000, "revision": 4}
+{"type": "haven/floorplan/set", "plan": {...}, "updated_at": 1763208005000, "base_revision": 4} → {"ok": true, "updated_at": 1763208005000, "revision": 5}
+{"type": "haven/floorplan/set", "plan": {...}, "base_revision": 4} → Fehler conflict
+{"type": "haven/prefs/get"} → {"prefs": {...}, "revision": 2}
+```
+
 ### `haven/floorplan/get` und `haven/floorplan/set`
 Speicher: `.storage/haven.floorplan` (Store-Version 1, Inhalt `{"plan": {...}, "updated_at": ...}`). `plan` ist das Dokument von `HavenFloorPlan.toJson` der App. Geprüft wird nur: Objekt, `version` (Zahl), `rooms` (Liste, jeder Eintrag mit `id`), `placements` (Liste, jeder Eintrag mit `entityId`), optional `furniture` (Liste, jeder Eintrag mit `id`). Geometrie prüft die App. Unbekannte Felder im `plan` bleiben unverändert erhalten.
 
@@ -302,10 +315,11 @@ Je Satz entsteht eine Image-Entity `image.haven_karte_<name>_<hell|dunkel>` (Att
 ## Event `haven_data_updated` (ab 0.3.0)
 Nach jedem erfolgreichen `haven/floorplan/set`, `haven/widgets/set` und `haven/prefs/set` feuert Haven auf dem HA-Event-Bus `haven_data_updated`, damit andere Geräte neu laden können.
 ```json
-{"event_type": "haven_data_updated", "data": {"kind": "floorplan", "updated_at": "2026-11-15T12:00:00Z"}}
+{"event_type": "haven_data_updated", "data": {"kind": "floorplan", "updated_at": "2026-11-15T12:00:00Z", "revision": 5}}
 ```
 - `kind`: `floorplan`, `widgets`, `prefs`, `automations` (nach `haven/automations/set|delete`), `heating` (nach `haven/heating/set|delete|display`) oder `render` (nach `haven/render/commit`).
 - `updated_at`: nur wenn bekannt (aus dem Befehl, bei Grundriss und Prefs sonst aus dem Feld `updatedAt` des Dokuments), unverändert als Text oder Zahl. Sonst fehlt der Schlüssel.
+- `revision`: bei `floorplan`, `widgets` und `prefs` die neue Revision (Feature `revisions`, siehe „Revisionen“).
 - Die App abonniert per `subscribe_events` mit `event_type: "haven_data_updated"`.
 - Einschränkung: HA erlaubt Nicht-Administratoren `subscribe_events` nur für Event-Typen aus der `SUBSCRIBE_ALLOWLIST` von HA. `haven_data_updated` steht nicht darin, das Abo funktioniert also nur mit einem Administrator-Konto (die App nutzt dessen Long-Lived-Token). Das stammt aus dem Wissen über den HA-Quellcode, nicht aus einem Test.
 
@@ -424,7 +438,7 @@ Liegt im Ordner `custom_components/haven/frontend/` ein Web-Build der App, melde
 ```
 cd integration && python3 -m pytest -q
 ```
-Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich, Zustand und Ablauf der Hintergrund-Netzmessung), `throttle`, `statecache` (auch Verfügbarkeits-Topics), `lastseen` (Quellen-Priorität, Formate, Verfügbarkeit, Option), `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration), `motion` (Bedingungen, Besitz-Automat, Befehle, Validierung, Migration), `scenesync` (Lampenzustand, Vergleich, Look, `sync`-Status) und `scenesync_runtime` (Messen, Übernehmen, Abgleichen, Wiederherstellen mit nachgebautem HA und Lampen). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `motion_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
+Die Tests laden die HA-freien Module ohne Home Assistant (`tests/conftest.py`): `exposes`, `z2m`, `commands` (Payload-Bauer, Transaktions-Abgleich, Zustand und Ablauf der Hintergrund-Netzmessung), `throttle`, `statecache` (auch Verfügbarkeits-Topics), `lastseen` (Quellen-Priorität, Formate, Verfügbarkeit, Option), `groupsync` (Raumwechsel), `appdata` (Validierung, Prefs, Event-Daten, Speicherformat mit `updated_at`/`layout`, Networkmap-Cache, Revisionen mit zwei simulierten Geräten in `test_revisions.py`), `lightgroups` (Gruppenerkennung), `rooms` (Zusammenstellung von `haven/rooms`), `panel` (Panel- und Static-Konfiguration, Möbel im Grundriss), `automations` (Normalisierung, Planung, Entprellen, Szenen-Umlauf, Validierung, Store-Migration), `motion` (Bedingungen, Besitz-Automat, Befehle, Validierung, Migration), `scenesync` (Lampenzustand, Vergleich, Look, `sync`-Status) und `scenesync_runtime` (Messen, Übernehmen, Abgleichen, Wiederherstellen mit nachgebautem HA und Lampen). Testdaten: ein anonymisierter Bestand mit 42 Geräten in `tests/fixtures/inventory.json` (echte Z2M-Modelle und Exposes, erfundene Namen und IEEE-Adressen) und verkleinerte Lichtzustände in `tests/data/light_states.json`. Die HA-abhängigen Module (`__init__`, `config_flow`, `websocket_api`, `storage`, `automations_runtime`, `motion_runtime`, `automations_ws`, `panel_setup`) sind nur per `py_compile` geprüft. Version 0.1.0 lief auf echtem HA (lesende Befehle), 0.2.0 und 0.3.0 noch nicht.
 
 Registry-Zugriffe laufen ohne `dev_reg.devices.values()` / `ent_reg.entities.values()` (ab HA 2027.9 veraltet): `haven/rooms` über `async_list_areas`, `dr/er.async_entries_for_area`, `er.async_entries_for_device`, Geräte ohne Bereich über `dr.async_entries_for_config_entry` aller Config-Entries, Lichter ohne Bereich über `hass.states.async_all("light")`. Die HA-Zuordnung der Zigbee-Geräte (`area_id`, `ha_entities`) liest nur Geräte der MQTT-Config-Entries. Geräte ganz ohne Config-Entry fehlen in `unassigned`.
 

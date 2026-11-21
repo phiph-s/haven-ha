@@ -8,11 +8,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .appdata import (
+    VersionedDoc,
     build_plan_doc,
     build_widgets_doc,
     deserialize_networkmap_cache,
-    normalize_prefs,
     read_plan_doc,
+    read_prefs_doc,
     read_widgets_doc,
     serialize_networkmap_cache,
 )
@@ -23,33 +24,44 @@ _KEY = f"{DOMAIN}_storage"
 _SCENE_PARTS = ("looks", "targets", "checks")
 
 
+def _versioned(store: Store[dict[str, Any]], what: str) -> VersionedDoc:
+    return VersionedDoc(store.async_load, store.async_save, what)
+
+
 class HavenStorage:
-    """Kleine Stores: ``{"plan": {...}}``, ``{"widgets": [...]}`` und ``{"prefs": {...}}``."""
+    """Kleine Stores: ``{"plan": {...}}``, ``{"widgets": [...]}`` und ``{"prefs": {...}}``.
+
+    Die drei App-Dokumente tragen dazu ``revision`` (siehe ``appdata.VersionedDoc``):
+    ``set`` mit ``base_revision`` lehnt einen veralteten Stand mit ``conflict`` ab.
+    """
 
     def __init__(self, hass: HomeAssistant) -> None:
-        self._plan = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.floorplan")
-        self._widgets = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.widgets")
-        self._prefs = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.prefs")
+        self._plan = _versioned(Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.floorplan"), "Der Grundriss")
+        self._widgets = _versioned(Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.widgets"), "Die Übersicht")
+        self._prefs = _versioned(Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.prefs"), "Die Einstellungen")
         self._networkmap = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.networkmap")
         self._scenes = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.scenes")
         self._scene_doc: dict[str, dict[str, Any]] | None = None
 
     async def async_get_plan_doc(self) -> dict[str, Any]:
-        """``{"plan": {...}|None, "updated_at": ...|None}``."""
+        """``{"plan": {...}|None, "updated_at": ...|None, "revision": n}``."""
         return read_plan_doc(await self._plan.async_load())
 
-    async def async_set_plan(self, plan: dict[str, Any], updated_at: Any = None) -> Any:
-        """Speichert den Grundriss und gibt das gespeicherte ``updated_at`` zurück.
+    async def async_set_plan(
+        self, plan: dict[str, Any], updated_at: Any = None, base_revision: int | None = None
+    ) -> dict[str, Any]:
+        """Speichert den Grundriss, gibt ``{"plan", "updated_at", "revision"}`` zurück.
 
         Ohne ``furniture`` im Plan (ältere App) bleiben die gespeicherten Möbel erhalten.
+        Wirft ``Z2MError("conflict")``, wenn ``base_revision`` veraltet ist.
         """
-        previous = None if "furniture" in plan else await self._plan.async_load()
-        doc = build_plan_doc(plan, updated_at, previous=previous)
-        await self._plan.async_save(doc)
-        return doc["updated_at"]
+        doc = await self._plan.async_update(
+            lambda previous: build_plan_doc(plan, updated_at, previous=previous), base_revision
+        )
+        return read_plan_doc(doc)
 
     async def async_get_widgets_doc(self) -> dict[str, Any]:
-        """``{"widgets": [...]|None, "layout": {...}|None, "updated_at": ...|None}``."""
+        """``{"widgets": [...]|None, "layout": {...}|None, "updated_at": ...|None, "revision": n}``."""
         return read_widgets_doc(await self._widgets.async_load())
 
     async def async_set_widgets(
@@ -59,11 +71,15 @@ class HavenStorage:
         updated_at: Any = None,
         *,
         layout_given: bool = False,
-    ) -> None:
-        previous = await self._widgets.async_load() if not layout_given else None
-        await self._widgets.async_save(
-            build_widgets_doc(widgets, layout, updated_at, previous=previous, layout_given=layout_given)
+        base_revision: int | None = None,
+    ) -> dict[str, Any]:
+        doc = await self._widgets.async_update(
+            lambda previous: build_widgets_doc(
+                widgets, layout, updated_at, previous=previous, layout_given=layout_given
+            ),
+            base_revision,
         )
+        return read_widgets_doc(doc)
 
     async def async_load_networkmap(self) -> dict[str, Any] | None:
         return deserialize_networkmap_cache(await self._networkmap.async_load())
@@ -74,12 +90,15 @@ class HavenStorage:
 
     async def async_get_prefs(self) -> dict[str, Any]:
         """Nie gespeichert: ``{"excluded_lights": []}``."""
-        data = await self._prefs.async_load()
-        prefs = data.get("prefs") if data else None
-        return normalize_prefs(prefs if isinstance(prefs, dict) else {})
+        return (await self.async_get_prefs_doc())["prefs"]
 
-    async def async_set_prefs(self, prefs: dict[str, Any]) -> None:
-        await self._prefs.async_save({"prefs": prefs})
+    async def async_get_prefs_doc(self) -> dict[str, Any]:
+        """``{"prefs": {...}, "revision": n}``."""
+        return read_prefs_doc(await self._prefs.async_load())
+
+    async def async_set_prefs(self, prefs: dict[str, Any], base_revision: int | None = None) -> dict[str, Any]:
+        """Speichert die Prefs, gibt ``{"prefs", "revision"}`` zurück (``conflict`` wie beim Plan)."""
+        return read_prefs_doc(await self._prefs.async_update(lambda _previous: {"prefs": prefs}, base_revision))
 
     async def _async_scene_doc(self) -> dict[str, dict[str, Any]]:
         """``{looks, targets, checks}``, je ``{"<group_id>:<scene_id>": ...}`` (einmal geladen)."""

@@ -22,6 +22,7 @@ from .appdata import (
     normalize_prefs,
     require_valid,
     resolve_updated_at,
+    validate_base_revision,
     validate_floorplan,
     validate_layout,
     validate_prefs,
@@ -667,6 +668,7 @@ async def ws_floorplan_get(
         vol.Required("type"): "haven/floorplan/set",
         vol.Required("plan"): dict,
         vol.Optional("updated_at"): vol.Any(str, int, float, None),
+        vol.Optional("base_revision"): vol.Any(int, None),
     }
 )
 @websocket_api.async_response
@@ -676,12 +678,13 @@ async def ws_floorplan_set(
     try:
         require_valid(validate_floorplan(msg["plan"]), "Der Grundriss")
         require_valid(validate_updated_at(msg.get("updated_at")), "updated_at")
+        require_valid(validate_base_revision(msg.get("base_revision")), "base_revision")
+        doc = await get_storage(hass).async_set_plan(msg["plan"], msg.get("updated_at"), msg.get("base_revision"))
     except Z2MError as err:
         _fail(connection, msg["id"], err)
         return
-    updated_at = await get_storage(hass).async_set_plan(msg["plan"], msg.get("updated_at"))
-    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("floorplan", updated_at))
-    connection.send_result(msg["id"], {"ok": True})
+    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("floorplan", doc["updated_at"], doc["revision"]))
+    connection.send_result(msg["id"], {"ok": True, "updated_at": doc["updated_at"], "revision": doc["revision"]})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "haven/widgets/get"})
@@ -699,6 +702,7 @@ async def ws_widgets_get(
         vol.Required("widgets"): list,
         vol.Optional("layout"): vol.Any(dict, None),
         vol.Optional("updated_at"): vol.Any(str, int, float, None),
+        vol.Optional("base_revision"): vol.Any(int, None),
     }
 )
 @websocket_api.async_response
@@ -709,15 +713,19 @@ async def ws_widgets_set(
         require_valid(validate_widgets(msg["widgets"]), "Die Widget-Konfiguration")
         require_valid(validate_layout(msg.get("layout")), "layout")
         require_valid(validate_updated_at(msg.get("updated_at")), "updated_at")
+        require_valid(validate_base_revision(msg.get("base_revision")), "base_revision")
+        doc = await get_storage(hass).async_set_widgets(
+            msg["widgets"],
+            msg.get("layout"),
+            msg.get("updated_at"),
+            layout_given="layout" in msg,
+            base_revision=msg.get("base_revision"),
+        )
     except Z2MError as err:
         _fail(connection, msg["id"], err)
         return
-    updated_at = msg.get("updated_at")
-    await get_storage(hass).async_set_widgets(
-        msg["widgets"], msg.get("layout"), updated_at, layout_given="layout" in msg
-    )
-    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("widgets", updated_at))
-    connection.send_result(msg["id"], {"ok": True})
+    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("widgets", doc["updated_at"], doc["revision"]))
+    connection.send_result(msg["id"], {"ok": True, "updated_at": doc["updated_at"], "revision": doc["revision"]})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "haven/prefs/get"})
@@ -725,24 +733,33 @@ async def ws_widgets_set(
 async def ws_prefs_get(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    connection.send_result(msg["id"], {"prefs": await get_storage(hass).async_get_prefs()})
+    connection.send_result(msg["id"], await get_storage(hass).async_get_prefs_doc())
 
 
 @websocket_api.require_admin
-@websocket_api.websocket_command({vol.Required("type"): "haven/prefs/set", vol.Required("prefs"): dict})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "haven/prefs/set",
+        vol.Required("prefs"): dict,
+        vol.Optional("base_revision"): vol.Any(int, None),
+    }
+)
 @websocket_api.async_response
 async def ws_prefs_set(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     try:
         require_valid(validate_prefs(msg["prefs"]), "Die Einstellungen")
+        require_valid(validate_base_revision(msg.get("base_revision")), "base_revision")
+        prefs = normalize_prefs(msg["prefs"])
+        doc = await get_storage(hass).async_set_prefs(prefs, msg.get("base_revision"))
     except Z2MError as err:
         _fail(connection, msg["id"], err)
         return
-    prefs = normalize_prefs(msg["prefs"])
-    await get_storage(hass).async_set_prefs(prefs)
-    hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("prefs", resolve_updated_at(None, prefs)))
-    connection.send_result(msg["id"], {"ok": True, "prefs": prefs})
+    hass.bus.async_fire(
+        EVENT_DATA_UPDATED, build_event_data("prefs", resolve_updated_at(None, prefs), doc["revision"])
+    )
+    connection.send_result(msg["id"], {"ok": True, "prefs": doc["prefs"], "revision": doc["revision"]})
 
 
 # --- Szenen der Z2M-Gruppen (Feature ``scenes``) ------------------------------------

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .commands import Z2MError
@@ -119,6 +121,13 @@ def normalize_prefs(prefs: dict[str, Any]) -> dict[str, Any]:
     return {**prefs, "excluded_lights": list(dict.fromkeys(items)), "locked": list(dict.fromkeys(locks))}
 
 
+def read_prefs_doc(data: Any) -> dict[str, Any]:
+    """Antwort von ``haven/prefs/get``: ``{"prefs": {...}, "revision": n}``. Nie gespeichert:
+    ``excluded_lights`` und ``locked`` leer, Revision 0."""
+    prefs = data.get("prefs") if isinstance(data, dict) else None
+    return {"prefs": normalize_prefs(prefs if isinstance(prefs, dict) else {}), "revision": read_revision(data)}
+
+
 # Z2M-Werte, die ein Gerät schalten (bei gesperrten Geräten abgelehnt). Einstellungen bleiben erlaubt.
 _CONTROL_KEYS = ("state", "brightness", "color", "color_temp", "effect")
 
@@ -173,7 +182,11 @@ def read_plan_doc(data: Any) -> dict[str, Any]:
     updated_at = data.get("updated_at")
     if updated_at is None or validate_updated_at(updated_at):
         updated_at = resolve_updated_at(None, plan)
-    return {"plan": plan if isinstance(plan, dict) else None, "updated_at": updated_at}
+    return {
+        "plan": plan if isinstance(plan, dict) else None,
+        "updated_at": updated_at,
+        "revision": read_revision(data),
+    }
 
 
 def build_widgets_doc(
@@ -204,15 +217,96 @@ def read_widgets_doc(data: Any) -> dict[str, Any]:
         "widgets": widgets if isinstance(widgets, list) else None,
         "layout": layout if isinstance(layout, dict) else None,
         "updated_at": None if validate_updated_at(updated_at) else updated_at,
+        "revision": read_revision(data),
     }
 
 
-def build_event_data(kind: str, updated_at: Any = None) -> dict[str, Any]:
-    """Payload von ``haven_data_updated``: ``kind`` und, falls bekannt, ``updated_at``."""
+def build_event_data(kind: str, updated_at: Any = None, revision: int | None = None) -> dict[str, Any]:
+    """Payload von ``haven_data_updated``: ``kind`` und, falls bekannt, ``updated_at`` und ``revision``."""
     data: dict[str, Any] = {"kind": kind}
     if updated_at is not None:
         data["updated_at"] = updated_at
+    if revision is not None:
+        data["revision"] = revision
     return data
+
+
+# --- Revisionen (Feature ``revisions``) -------------------------------------------
+#
+# Jedes App-Dokument (Grundriss, Widgets, Prefs) trägt eine Revision, die nur der Server
+# vergibt: 0 = nie mit Revision gespeichert, danach +1 je ``set``. Ein Client schickt beim
+# Speichern die Revision mit, auf der seine Fassung beruht (``base_revision``). Passt sie
+# nicht mehr, hat inzwischen ein anderes Gerät gespeichert: Haven lehnt mit ``conflict``
+# ab, der Client lädt neu und führt zusammen. Uhrzeiten der Geräte zählen dabei nicht.
+# Ohne ``base_revision`` (ältere Apps) wird wie bisher ohne Prüfung gespeichert, die
+# Revision steigt trotzdem, damit neuere Geräte die Änderung erkennen.
+
+
+def read_revision(data: Any) -> int:
+    """Revision eines gespeicherten Dokuments, 0 wenn es keine trägt."""
+    value = data.get("revision") if isinstance(data, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def validate_base_revision(value: Any) -> list[str]:
+    """``base_revision`` ist optional: ``None`` oder eine ganze Zahl ab 0."""
+    if value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0):
+        return []
+    return ["base_revision muss eine ganze Zahl ab 0 sein"]
+
+
+def check_base_revision(current: int, base: Any, what: str = "Das Dokument") -> None:
+    """Wirft ``conflict``, wenn ``base`` angegeben ist und nicht mehr der gespeicherte Stand ist."""
+    if base is None or base == current:
+        return
+    raise Z2MError(
+        "conflict",
+        f"{what} wurde inzwischen auf einem anderen Gerät geändert "
+        f"(Stand {current}, gesendet für {base}). Bitte neu laden.",
+    )
+
+
+class VersionedDoc:
+    """Ein Store-Dokument mit Revision, Lesen und Schreiben ohne Home Assistant.
+
+    ``load`` und ``save`` sind die Funktionen des HA-``Store``. Alle Schreibvorgänge laufen
+    unter einer Sperre: Prüfen der ``base_revision``, Bauen und Speichern sind ein Schritt,
+    zwei gleichzeitige ``set`` können sich nicht gegenseitig überschreiben.
+    """
+
+    def __init__(
+        self,
+        load: Callable[[], Awaitable[Any]],
+        save: Callable[[dict[str, Any]], Awaitable[None]],
+        what: str = "Das Dokument",
+    ) -> None:
+        self._load = load
+        self._save = save
+        self._what = what
+        self._lock = asyncio.Lock()
+        self._data: Any = None
+        self._loaded = False
+
+    async def async_load(self) -> Any:
+        """Gespeicherter Inhalt (roh, ``None`` wenn nie gespeichert)."""
+        if not self._loaded:
+            self._data = await self._load()
+            self._loaded = True
+        return self._data
+
+    async def async_update(
+        self, build: Callable[[Any], dict[str, Any]], base_revision: Any = None
+    ) -> dict[str, Any]:
+        """Baut aus dem bisherigen Inhalt den neuen (``build(previous)``) und speichert ihn
+        mit der nächsten Revision. Gibt das gespeicherte Dokument zurück."""
+        async with self._lock:
+            previous = await self.async_load()
+            current = read_revision(previous)
+            check_base_revision(current, base_revision, self._what)
+            doc = {**build(previous), "revision": current + 1}
+            await self._save(doc)
+            self._data = doc
+            return doc
 
 
 def normalize_networkmap_cache(data: Any) -> dict[str, Any] | None:

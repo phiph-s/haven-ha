@@ -140,20 +140,25 @@ def test_plan_doc_keeps_unknown_fields():
     plan = {**PLAN, "updatedAt": "2026-11-15T12:00:00Z", "neu": {"x": 1}}
     stored = appdata.build_plan_doc(plan)
     assert stored["plan"] == plan and stored["updated_at"] == "2026-11-15T12:00:00Z"
-    assert appdata.read_plan_doc(stored) == {"plan": plan, "updated_at": "2026-11-15T12:00:00Z"}
+    assert appdata.read_plan_doc(stored) == {"plan": plan, "updated_at": "2026-11-15T12:00:00Z", "revision": 0}
     assert appdata.build_plan_doc(plan, 5)["updated_at"] == 5
     # Alter Speicherstand ohne updated_at
-    assert appdata.read_plan_doc({"plan": PLAN}) == {"plan": PLAN, "updated_at": None}
-    assert appdata.read_plan_doc(None) == {"plan": None, "updated_at": None}
+    assert appdata.read_plan_doc({"plan": PLAN}) == {"plan": PLAN, "updated_at": None, "revision": 0}
+    assert appdata.read_plan_doc(None) == {"plan": None, "updated_at": None, "revision": 0}
 
 
 def test_widgets_doc():
     widgets = [{"id": "power", "type": "power", "entities": [], "options": {}, "extra": 1}]
-    assert appdata.read_widgets_doc(None) == {"widgets": None, "layout": None, "updated_at": None}
+    assert appdata.read_widgets_doc(None) == {"widgets": None, "layout": None, "updated_at": None, "revision": 0}
     # Alter Speicherstand (0.2.0)
-    assert appdata.read_widgets_doc({"widgets": widgets}) == {"widgets": widgets, "layout": None, "updated_at": None}
+    assert appdata.read_widgets_doc({"widgets": widgets}) == {
+        "widgets": widgets,
+        "layout": None,
+        "updated_at": None,
+        "revision": 0,
+    }
     doc = appdata.build_widgets_doc(widgets, {"cols": 2}, "t", layout_given=True)
-    assert appdata.read_widgets_doc(doc) == {"widgets": widgets, "layout": {"cols": 2}, "updated_at": "t"}
+    assert appdata.read_widgets_doc(doc) == {"widgets": widgets, "layout": {"cols": 2}, "updated_at": "t", "revision": 0}
     # Alter Client sendet kein layout: bisheriges bleibt
     kept = appdata.build_widgets_doc(widgets, None, None, previous=doc)
     assert kept["layout"] == {"cols": 2} and kept["updated_at"] is None
