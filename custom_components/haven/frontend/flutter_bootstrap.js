@@ -53,7 +53,7 @@ _flutter.buildConfig = {"engineRevision":"371f77202a73e8dff57a8b3bff75bca55c090a
     // Der Panel-Build enthält nur die volle CanvasKit.
     config: { canvasKitVariant: "full" },
     serviceWorkerSettings: {
-      serviceWorkerVersion: "1213449917" /* Flutter's service worker is deprecated and will be removed in a future Flutter release. */,
+      serviceWorkerVersion: "2172143051" /* Flutter's service worker is deprecated and will be removed in a future Flutter release. */,
     },
   });
 })();

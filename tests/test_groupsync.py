@@ -83,3 +83,33 @@ def test_find_room_group_ignores_non_lights(inventory):
     # ein Knopf allein bestimmt keine Raumgruppe
     assert groupsync.find_room_group(bridge.groups, {ref("Drehknopf Kochbereich")}, lights) is None
     assert json.dumps(bridge.groups)  # Rohdaten bleiben serialisierbar
+
+
+# --- Gruppe für einen Raum anlegen --------------------------------------------------------
+
+
+def test_room_group_name_avoids_collisions_and_bad_chars():
+    name = groupsync.room_group_name
+    assert name("Salon", set()) == "Salon"
+    assert name("Salon", {"salon"}) == "Salon Gruppe"
+    assert name("Salon", {"Salon", "Salon Gruppe"}) == "Salon Gruppe 2"
+    assert name("Bad/WC #1", set()) == "Bad WC 1"
+    assert name("  ", set()) == "Raum"
+
+
+def test_plan_room_group_creates_group_with_lights():
+    plan = groupsync.plan_room_group("Diele", {"0xb", "0xa"}, [], {"Diele"})
+    assert plan["name"] == "Diele Gruppe"
+    assert plan["requests"] == [
+        ("group/add", {"friendly_name": "Diele Gruppe"}),
+        ("group/members/add", {"group": "Diele Gruppe", "device": "0xa"}),
+        ("group/members/add", {"group": "Diele Gruppe", "device": "0xb"}),
+    ]
+
+
+def test_plan_room_group_refuses_without_lights_or_with_group():
+    assert groupsync.plan_room_group("Diele", set(), [], set())["error"] == "no_lights"
+    groups = [{"id": 3, "friendly_name": "Flur", "members": [{"ieee_address": "0xa", "endpoint": 1}]}]
+    plan = groupsync.plan_room_group("Diele", {"0xa", "0xb"}, groups, set())
+    assert plan["error"] == "group_exists"
+    assert "Flur" in plan["message"]

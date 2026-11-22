@@ -156,6 +156,9 @@ Setzt den Bereich des HA-Geräts in der Device-Registry (Z2M bleibt unverändert
 ```
 `group_sync` fehlt ohne `sync_group` oder bei gleichem Bereich. `skipped`: `null`, `not_a_light`, `same_group`, `no_new_area`, `no_group_for_area` (Aktionen für den anderen Teil können trotzdem laufen).
 
+### `haven/zigbee/create_room_group` (`{"area_id": "..."}`, Feature `room_groups`)
+Legt für einen Bereich ohne Z2M-Gruppe eine an (Szenen brauchen eine): Name ist der Bereichsname (bei Kollision mit einem Gerät oder einer Gruppe `<Bereich> Gruppe`, dann mit Nummer; `#`, `+`, `/` werden zu Leerzeichen), Mitglieder sind alle Zigbee-Lichter mit diesem HA-Gerätebereich (`bridge/request/group/add`, dann `group/members/add` je Licht). Antwort `{ok, group: {id, friendly_name}, added: [ieee], failed: [{ieee, error}]}`. Fehler: `not_found` (Bereich), `no_lights` (keine Zigbee-Lichter), `group_exists` (eine Gruppe enthält schon Lichter des Bereichs, Haven nimmt dann diese). Danach ordnet `haven/rooms` die Gruppe wie gewohnt über die Lichter zu; spätere Raumwechsel halten sie über `set_area` mit `sync_group` aktuell.
+
 ### `haven/zigbee/identify`
 Topic: `<base>/<friendly_name>/set` mit `{"identify": "identify"}`. Nur wenn das Gerät ein beschreibbares `identify`-Expose hat, sonst Fehler `not_supported`.
 ```json

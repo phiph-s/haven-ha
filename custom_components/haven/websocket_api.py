@@ -39,7 +39,7 @@ from .commands import (
     supports_identify,
 )
 from .const import DOMAIN, EVENT_DATA_UPDATED, FEATURES, STATE_MAX_PER_SECOND
-from .groupsync import plan_group_sync
+from .groupsync import plan_group_sync, plan_room_group
 from .scenes import (
     attach_looks,
     find_group,
@@ -76,6 +76,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_zigbee_set,
         ws_zigbee_rename,
         ws_zigbee_set_area,
+        ws_zigbee_create_room_group,
         ws_zigbee_identify,
         ws_zigbee_interview,
         ws_zigbee_remove,
@@ -541,6 +542,39 @@ async def ws_zigbee_set_area(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[s
         "actions": done,
     }
     return result
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): "haven/zigbee/create_room_group", vol.Required("area_id"): str})
+@websocket_api.async_response
+@_z2m_write
+async def ws_zigbee_create_room_group(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
+    """Legt für einen Bereich ohne Gruppe eine Z2M-Gruppe mit seinen
+    Zigbee-Lichtern an (Szenen brauchen eine Gruppe)."""
+    area = ar.async_get(hass).async_get_area(msg["area_id"])
+    if area is None:
+        raise Z2MError("not_found", f"Unbekannter Bereich {msg['area_id']}")
+    taken = {str(d.get("friendly_name")) for d in bridge.devices.values() if d.get("friendly_name")}
+    taken |= {str(g.get("friendly_name")) for g in bridge.groups if g.get("friendly_name")}
+    plan = plan_room_group(area.name, _area_lights(hass, bridge, area.id) or set(), bridge.groups, taken)
+    if "error" in plan:
+        raise Z2MError(plan["error"], plan["message"])
+    (add_topic, add_payload), *members = plan["requests"]
+    created = await bridge.async_request(add_topic, add_payload)
+    added: list[str] = []
+    failed: list[dict[str, str]] = []
+    for topic, payload in members:
+        try:
+            await bridge.async_request(topic, payload)
+            added.append(payload["device"])
+        except Z2MError as err:
+            failed.append({"ieee": payload["device"], "error": err.message})
+    return {
+        "ok": True,
+        "group": {"id": created.get("id"), "friendly_name": plan["name"]},
+        "added": added,
+        "failed": failed,
+    }
 
 
 @websocket_api.require_admin

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .commands import build_group_member
@@ -99,3 +100,48 @@ def _action(kind: str, group: dict[str, Any], ieee: str, endpoint: Any) -> dict[
         "group": group.get("friendly_name"),
         "group_id": group.get("id"),
     }
+
+
+# --- Gruppe für einen Raum anlegen ------------------------------------------------------
+
+# Zeichen, die Zigbee2MQTT in Namen nicht mag (MQTT-Platzhalter, Pfade).
+_BAD_NAME = re.compile(r"[#+/\\]")
+
+
+def room_group_name(area_name: str, taken: set[str]) -> str:
+    """Freier Name für die Gruppe eines Raums: der Raumname, bei Kollision
+    mit einem Gerät oder einer Gruppe „<Raum> Gruppe“, dann mit Nummer."""
+    base = _BAD_NAME.sub(" ", area_name).strip()
+    base = re.sub(r"\s+", " ", base) or "Raum"
+    lower = {t.casefold() for t in taken}
+    for candidate in (base, f"{base} Gruppe", *(f"{base} Gruppe {i}" for i in range(2, 100))):
+        if candidate.casefold() not in lower:
+            return candidate
+    raise ValueError("kein freier Name")
+
+
+def plan_room_group(
+    area_name: str,
+    room_lights: set[str],
+    groups: list[dict[str, Any]],
+    taken_names: set[str],
+) -> dict[str, Any]:
+    """Anfragen, um für einen Raum ohne Gruppe eine Z2M-Gruppe mit seinen
+    Zigbee-Lichtern anzulegen.
+
+    Ergebnis ``{name, requests: [(topic, payload)]}`` oder ``{error, message}``:
+    ``no_lights`` (keine Zigbee-Lichter im Raum), ``group_exists`` (eine Gruppe
+    enthält schon Lichter des Raums, Haven nimmt dann diese).
+    """
+    if not room_lights:
+        return {"error": "no_lights", "message": f"In {area_name} gibt es keine Zigbee-Lampen"}
+    existing = find_room_group(groups, room_lights, room_lights)
+    if existing is not None:
+        return {
+            "error": "group_exists",
+            "message": f"{area_name} hat schon die Gruppe {existing.get('friendly_name')}",
+        }
+    name = room_group_name(area_name, taken_names)
+    requests: list[tuple[str, dict[str, Any]]] = [("group/add", {"friendly_name": name})]
+    requests += [("group/members/add", build_group_member(name, ieee)) for ieee in sorted(room_lights)]
+    return {"name": name, "requests": requests}
