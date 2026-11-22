@@ -337,7 +337,8 @@ Komplexere Abläufe laufen direkt in Haven statt als HA-Automation. Es gibt die 
              "scenes": [3, 0, 1], "on_action": "last", "on_scene": null,
              "step": 35, "transition": 0.2, "min_brightness": 3, "off_at_min": false}}
 ```
-- Gesten: `rotate` (`none`, `brightness`), `single`/`double`/`hold` (`none`, `toggle`, `next_scene`, `scene` mit `scene`, `off` = alles aus im Raum).
+- Gesten: `rotate` (`none`, `brightness`), `single`/`double`/`hold` (`none`, `toggle`, `next_scene`, `scene` mit `scene`, `off` = alles aus im Raum, `lights` = eigene Aktion, ab 0.6.36, Feature `knob_lights`).
+- `lights`: bestimmte Lampen aus beliebigen Räumen auf einen festen Zustand, z. B. `{"action": "lights", "lights": [{"entity_id": "light.a", "on": true, "brightness": 60, "kelvin": 2700}, {"entity_id": "light.b", "on": true, "rgb": [255, 138, 31]}, {"entity_id": "light.c", "on": false}]}`. Je Lampe `on`, wenn an wahlweise `brightness` (1 bis 100 %) und `kelvin` (1000 bis 10000) oder `rgb`; fehlt beides, bleibt die Farbe. Höchstens 50 Lampen. Ausführung per `light.turn_on`/`light.turn_off` mit der `transition` der Automation, Lampen mit gleichem Zustand in einem Aufruf.
 - `scenes`: Szenen-IDs der Z2M-Raumgruppe in Umlauf-Reihenfolge, `null` = alle. `on_action`: `last` (zuletzt) oder `scene` (`on_scene`) beim Einschalten per Ein/Aus.
 - `step` 1 bis 255 (von 255), `transition` 0 bis 10 s, `min_brightness` 1 bis 254 (Grenze beim Runterdrehen), `off_at_min`: am Minimum nach links drehen schaltet aus.
 - Ein Gerät darf nur in einer aktiven Automation stecken (`device_taken`). Der Raum braucht eine Z2M-Gruppe oder Lichter (`no_lights`).

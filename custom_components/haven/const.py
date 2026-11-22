@@ -5,7 +5,7 @@ from __future__ import annotations
 DOMAIN = "haven"
 
 # Fähigkeiten für haven/info (die App prüft darauf statt auf die Version)
-FEATURES = ("light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "automations", "networkmap_background", "ghost_detection", "scenes", "heating", "render", "render_files", "scene_sync", "revisions", "device_protocol")
+FEATURES = ("light_groups", "room_devices", "prefs", "data_events", "networkmap_cache", "automations", "networkmap_background", "ghost_detection", "scenes", "heating", "render", "render_files", "scene_sync", "revisions", "device_protocol", "knob_lights")
 
 # Plattformen des Entries (Bilder der Wohnung, siehe image.py)
 PLATFORMS = ("image",)

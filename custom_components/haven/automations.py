@@ -31,7 +31,9 @@ from .commands import Z2MError
 AUTOMATION_TYPES = ("room_knob", "room_motion")
 GESTURES = ("rotate", "single", "double", "hold")
 # Aktionen für Druck-Gesten (Drücken, Doppelt, Halten)
-PRESS_ACTIONS = ("none", "toggle", "next_scene", "scene", "off")
+PRESS_ACTIONS = ("none", "toggle", "next_scene", "scene", "off", "lights")
+# Höchstens so viele Lampen in einer Aktion „lights“.
+MAX_LIGHT_TARGETS = 50
 # Aktionen für Drehen
 ROTATE_ACTIONS = ("none", "brightness")
 ON_ACTIONS = ("last", "scene")
@@ -394,6 +396,8 @@ def validate_shape(doc: Any) -> list[str]:
                 errors.append(f"{g}: unbekannte Aktion {value.get('action')}")
             elif value.get("action") == "scene" and not _is_int(value.get("scene")):
                 errors.append(f"{g}: Szene fehlt")
+            elif value.get("action") == "lights":
+                errors += [f"{g}: {e}" for e in validate_light_targets(value.get("lights"))]
     scenes = opts.get("scenes")
     if scenes is not None and (not isinstance(scenes, list) or not all(_is_int(s) for s in scenes)):
         errors.append("scenes muss eine Liste von Szenen-IDs sein")
@@ -553,7 +557,85 @@ def plan_gesture(
         return _plan_scene(room, target, base_topic)
     if action == "scene":
         return _plan_scene(room, binding.get("scene"), base_topic)
+    if action == "lights":
+        return plan_light_targets(binding.get("lights"), float(options["transition"]))
     return Plan(note="nicht belegt")
+
+
+def validate_light_targets(targets: Any) -> list[str]:
+    """Prüft die Lampen einer Aktion „lights“.
+
+    Je Lampe: ``entity_id`` (``light.*``), ``on`` und, wenn an, wahlweise
+    ``brightness`` (1 bis 100 %) und entweder ``kelvin`` (1000 bis 10000) oder
+    ``rgb`` (drei Werte 0 bis 255).
+    """
+    if not isinstance(targets, list) or not targets:
+        return ["Lampen fehlen"]
+    if len(targets) > MAX_LIGHT_TARGETS:
+        return [f"höchstens {MAX_LIGHT_TARGETS} Lampen"]
+    errors: list[str] = []
+    seen: set[str] = set()
+    for t in targets:
+        if not isinstance(t, dict):
+            errors.append("Lampe muss ein Objekt sein")
+            continue
+        eid = t.get("entity_id")
+        if not isinstance(eid, str) or not eid.startswith("light.") or len(eid) > 255:
+            errors.append(f"keine Lampe: {eid}")
+            continue
+        if eid in seen:
+            errors.append(f"{eid} doppelt")
+        seen.add(eid)
+        if not isinstance(t.get("on"), bool):
+            errors.append(f"{eid}: an oder aus fehlt")
+        b = t.get("brightness")
+        if b is not None and (not _is_int(b) or not 1 <= b <= 100):
+            errors.append(f"{eid}: Helligkeit 1 bis 100")
+        k = t.get("kelvin")
+        if k is not None and (not _is_int(k) or not 1000 <= k <= 10000):
+            errors.append(f"{eid}: Farbtemperatur 1000 bis 10000 K")
+        rgb = t.get("rgb")
+        if rgb is not None and (
+            not isinstance(rgb, list) or len(rgb) != 3 or not all(_is_int(c) and 0 <= c <= 255 for c in rgb)
+        ):
+            errors.append(f"{eid}: Farbe als drei Werte 0 bis 255")
+        if k is not None and rgb is not None:
+            errors.append(f"{eid}: Farbtemperatur oder Farbe, nicht beides")
+    return errors
+
+
+def plan_light_targets(targets: Any, transition: float) -> Plan:
+    """Lampen auf einen festen Zustand. Lampen mit gleichem Zustand teilen
+    sich einen Aufruf. Ungültige Einträge fallen weg (alte Daten)."""
+    if validate_light_targets(targets):
+        valid = [t for t in targets or [] if isinstance(t, dict) and not validate_light_targets([t])]
+    else:
+        valid = list(targets)
+    if not valid:
+        return Plan(note="keine Lampen")
+    off: list[str] = []
+    on: dict[str, list[str]] = {}
+    datas: dict[str, dict[str, Any]] = {}
+    for t in valid:
+        if not t["on"]:
+            off.append(t["entity_id"])
+            continue
+        data: dict[str, Any] = {"transition": transition}
+        if t.get("brightness") is not None:
+            data["brightness_pct"] = t["brightness"]
+        if t.get("kelvin") is not None:
+            data["color_temp_kelvin"] = t["kelvin"]
+        if t.get("rgb") is not None:
+            data["rgb_color"] = list(t["rgb"])
+        key = json.dumps(data, sort_keys=True)
+        on.setdefault(key, []).append(t["entity_id"])
+        datas[key] = data
+    services: list[tuple[str, str, dict[str, Any]]] = [
+        ("light", "turn_on", {"entity_id": ids, **datas[key]}) for key, ids in on.items()
+    ]
+    if off:
+        services.append(("light", "turn_off", {"entity_id": off, "transition": transition}))
+    return Plan("lights", services=services)
 
 
 def _plan_brightness(

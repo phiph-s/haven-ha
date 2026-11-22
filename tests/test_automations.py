@@ -335,3 +335,53 @@ def test_public_and_event_data(targets):
 def test_ha_modules_compile():
     for name in ("automations_runtime.py", "automations_ws.py", "websocket_api.py", "__init__.py"):
         py_compile.compile(str(PKG / name), doraise=True)
+
+
+# --- Eigene Aktion: Lampen auf einen festen Zustand ---------------------------------------
+
+
+def test_lights_action_plan_groups_same_state(targets):
+    _, rooms = targets
+    lights = [
+        {"entity_id": "light.a", "on": True, "brightness": 60, "kelvin": 2700},
+        {"entity_id": "light.b", "on": True, "brightness": 60, "kelvin": 2700},
+        {"entity_id": "light.c", "on": True, "rgb": [255, 80, 0]},
+        {"entity_id": "light.d", "on": False},
+    ]
+    knob = _knob(gestures={"hold": {"action": "lights", "lights": lights}}, transition=0.5)
+    assert auto.validate_shape(knob) == []
+    plan = auto.plan_gesture(knob, auto.Gesture("hold"), rooms["salon"], auto.RoomState(True, 100))
+    assert plan.action == "lights"
+    assert plan.mqtt == []
+    assert plan.services == [
+        ("light", "turn_on", {"entity_id": ["light.a", "light.b"], "transition": 0.5, "brightness_pct": 60, "color_temp_kelvin": 2700}),
+        ("light", "turn_on", {"entity_id": ["light.c"], "transition": 0.5, "rgb_color": [255, 80, 0]}),
+        ("light", "turn_off", {"entity_id": ["light.d"], "transition": 0.5}),
+    ]
+    # Unabhängig vom Raumzustand (auch wenn alles aus ist).
+    again = auto.plan_gesture(knob, auto.Gesture("hold"), rooms["salon"], auto.RoomState(False, 0))
+    assert again.services == plan.services
+
+
+def test_lights_action_validation():
+    v = auto.validate_light_targets
+    assert v([]) == ["Lampen fehlen"]
+    assert v(None) == ["Lampen fehlen"]
+    assert v([{"entity_id": "switch.x", "on": True}]) == ["keine Lampe: switch.x"]
+    assert v([{"entity_id": "light.x"}]) == ["light.x: an oder aus fehlt"]
+    assert v([{"entity_id": "light.x", "on": True, "brightness": 0}])
+    assert v([{"entity_id": "light.x", "on": True, "kelvin": 2700, "rgb": [1, 2, 3]}])
+    assert v([{"entity_id": "light.x", "on": True, "rgb": [1, 2]}])
+    assert v([{"entity_id": "light.x", "on": True}, {"entity_id": "light.x", "on": False}]) == ["light.x doppelt"]
+    assert v([{"entity_id": f"light.l{i}", "on": True} for i in range(auto.MAX_LIGHT_TARGETS + 1)])
+    knob = _knob(gestures={"single": {"action": "lights", "lights": []}})
+    assert auto.validate_shape(knob) == ["single: Lampen fehlen"]
+    # Drehen kann keine Lampen setzen.
+    assert auto.validate_shape(_knob(gestures={"rotate": {"action": "lights", "lights": [{"entity_id": "light.a", "on": True}]}}))
+
+
+def test_lights_action_skips_broken_entries(targets):
+    _, rooms = targets
+    knob = _knob(gestures={"double": {"action": "lights", "lights": [{"entity_id": "light.a", "on": True}, {"entity_id": "x"}]}})
+    plan = auto.plan_gesture(knob, auto.Gesture("double"), rooms["salon"], auto.RoomState(None, None))
+    assert plan.services == [("light", "turn_on", {"entity_id": ["light.a"], "transition": 0.2})]
