@@ -352,10 +352,10 @@ Komplexere Abläufe laufen direkt in Haven statt als HA-Automation. Es gibt die 
 |---|---|---|
 | `haven/automations/list` | – | `{automations: [{..., last_triggered: {at, action}\|null}], rooms: {area_id: {group, group_id, scenes, lights, has_lights}}, device_automations: {ieee: ["automation.x"]}, running}` |
 | `haven/automations/set` (Admin) | `{automation: {...}}` (ohne `id` = neu) | `{ok, automation}` |
-| `haven/automations/delete` (Admin) | `{id}` | `{ok}` |
-| `haven/automations/test` (Admin) | `{id, action}` mit `rotate_left`, `rotate_right`, `single`, `double`, `hold` (Drehregler) bzw. `motion`, `clear`, `takeover` (Bewegungslicht) | `{ok, plan: {action, mqtt, services, scene, note}}`, bei Bewegungslicht zusätzlich `motion` (Zustand) |
+| `haven/automations/delete` (Admin) | `{automation_id}` | `{ok}` |
+| `haven/automations/test` (Admin) | `{automation_id, action}` mit `rotate_left`, `rotate_right`, `single`, `double`, `hold` (Drehregler) bzw. `motion`, `clear`, `takeover` (Bewegungslicht) | `{ok, plan: {action, mqtt, services, scene, note}}`, bei Bewegungslicht zusätzlich `motion` (Zustand) |
 
-`device_automations` nennt je Drehregler/Taster die HA-Automationen, die das Gerät verwenden (`automation.automations_with_device`), damit die App doppelte Auslösung erkennt. Nach `set` und `delete` feuert `haven_data_updated` mit `kind: "automations"`. Fehler: `invalid_format`, `not_found`, `no_lights`, `device_taken`.
+`device_automations` nennt je Drehregler/Taster die HA-Automationen, die das Gerät verwenden (`automation.automations_with_device`), damit die App doppelte Auslösung erkennt. Die ID heißt `automation_id`, weil `id` bei HA die Nummer der Nachricht ist. Nach `set` und `delete` feuert `haven_data_updated` mit `kind: "automations"`. Fehler: `invalid_format`, `not_found`, `no_lights`, `device_taken`.
 
 ### Bewegungslicht (`room_motion`)
 Melder (Z2M-Geräte mit `occupancy` oder `presence`) schalten das Licht eines Raums, aber nur unter Bedingungen. Wichtigster Punkt: Haven weiß, **wem das Licht gerade gehört**. Wer es heller dreht, bekommt nicht wieder die Szene.

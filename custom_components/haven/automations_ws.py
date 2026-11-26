@@ -101,7 +101,8 @@ async def ws_automations_set(
 
 @websocket_api.require_admin
 @websocket_api.websocket_command(
-    {vol.Required("type"): "haven/automations/delete", vol.Required("id"): str}
+    # `id` ist bei HA die Nummer der Nachricht, daher `automation_id`.
+    {vol.Required("type"): "haven/automations/delete", vol.Required("automation_id"): str}
 )
 @websocket_api.async_response
 async def ws_automations_delete(
@@ -109,8 +110,8 @@ async def ws_automations_delete(
 ) -> None:
     engine = get_engine(hass)
     await engine.async_load()
-    if not await engine.async_delete(msg["id"]):
-        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Unbekannte Automation {msg['id']}")
+    if not await engine.async_delete(msg["automation_id"]):
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Unbekannte Automation {msg['automation_id']}")
         return
     hass.bus.async_fire(EVENT_DATA_UPDATED, build_event_data("automations"))
     connection.send_result(msg["id"], {"ok": True})
@@ -120,7 +121,7 @@ async def ws_automations_delete(
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "haven/automations/test",
-        vol.Required("id"): str,
+        vol.Required("automation_id"): str,
         vol.Required("action"): vol.In(
             ["rotate_left", "rotate_right", "single", "double", "hold", *TEST_ACTIONS]
         ),
@@ -133,7 +134,7 @@ async def ws_automations_test(
     engine = get_engine(hass)
     await engine.async_load()
     if msg["action"] in TEST_ACTIONS:
-        automation = engine.get(msg["id"])
+        automation = engine.get(msg["automation_id"])
         if engine.bridge is None or automation is None or automation.get("type") != "room_motion":
             connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Kein Bewegungslicht mit dieser ID")
             return
@@ -149,7 +150,7 @@ async def ws_automations_test(
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Haven ist nicht eingerichtet oder nicht geladen")
         return
     try:
-        plan = engine.test(msg["id"], gesture)
+        plan = engine.test(msg["automation_id"], gesture)
     except Z2MError as err:
         connection.send_error(msg["id"], err.code, err.message)
         return

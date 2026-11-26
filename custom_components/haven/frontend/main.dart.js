@@ -130165,7 +130165,7 @@ og(a){return this.b5w(a)},
 b5w(a){var s=0,r=A.z(t.H),q,p=this,o,n,m,l,k,j
 var $async$og=A.v(function(b,c){if(b===1)return A.w(c,r)
 for(;;)switch(s){case 0:s=3
-return A.j(A.aZ(p).P($.bE(),t.L).gm8().u0("haven/automations/delete",A.ac(["id",a],t.N,t.z)),$async$og)
+return A.j(A.aZ(p).P($.bE(),t.L).gm8().u0("haven/automations/delete",A.ac(["automation_id",a],t.N,t.z)),$async$og)
 case 3:if(!A.aZ(p).ghm()){s=1
 break}o=p.ga5().gq()
 if(o==null)o=B.m_
@@ -131086,7 +131086,7 @@ if(j==null){s=1
 break}A.bO()
 p=4
 s=7
-return A.j(A.aZ(n.gad().P($.fE().gbT(),t.Uz)).P($.bE(),t.L).gm8().u0("haven/automations/test",A.ac(["id",j,"action",a],t.N,t.z)),$async$L3)
+return A.j(A.aZ(n.gad().P($.fE().gbT(),t.Uz)).P($.bE(),t.L).gm8().u0("haven/automations/test",A.ac(["automation_id",j,"action",a],t.N,t.z)),$async$L3)
 case 7:p=2
 s=6
 break
@@ -132478,7 +132478,7 @@ if(j==null){s=1
 break}A.bO()
 p=4
 s=7
-return A.j(A.aZ(n.gad().P($.fE().gbT(),t.Uz)).P($.bE(),t.L).gm8().u0("haven/automations/test",A.ac(["id",j,"action",a],t.N,t.z)),$async$zy)
+return A.j(A.aZ(n.gad().P($.fE().gbT(),t.Uz)).P($.bE(),t.L).gm8().u0("haven/automations/test",A.ac(["automation_id",j,"action",a],t.N,t.z)),$async$zy)
 case 7:p=2
 s=6
 break
