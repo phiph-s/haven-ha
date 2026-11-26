@@ -53,6 +53,7 @@ from .scenes import (
     stored,
     validate_look,
 )
+from .room_scenes import public_room_scene, room_scene_list
 from .rooms import AreaData, DeviceData, EntityData, assemble_rooms, protocol_of_identifiers
 from .scenesync import attach_sync
 from .scenesync_runtime import SceneSync, group_lock
@@ -99,6 +100,11 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_zigbee_scene_repair,
     ):
         websocket_api.async_register_command(hass, command)
+
+    # Szenen je Raum mit Zusatzgeräten (haven/scenes/*)
+    from .room_scenes_ws import async_register_room_scene_commands  # noqa: PLC0415
+
+    async_register_room_scene_commands(hass)
 
     # Haven-Automationen (haven/automations/*), eigenes Modul
     from .automations_ws import async_register_automation_commands  # noqa: PLC0415
@@ -196,7 +202,18 @@ async def ws_zigbee_groups(
 def _groups_with_scenes(bridge: Z2MBridge, storage: HavenStorage) -> list[dict[str, Any]]:
     """``groups_summary`` mit ``look``, ``sync`` und ``checked_at`` an jeder Szene (aus dem Speicher)."""
     targets, checks = storage.scene_sync_cached()
-    return attach_sync(attach_looks(bridge.groups_summary(), storage.scene_looks_cached()), targets, checks)
+    extras, _ = storage.scene_extras_cached()
+    groups = attach_sync(attach_looks(bridge.groups_summary(), storage.scene_looks_cached()), targets, checks)
+    # Zusatzgeräte je Szene (Feature room_scenes)
+    return [
+        {
+            **g,
+            "scenes": [
+                {**s, "devices": list(extras.get(scene_key(g.get("id"), s.get("id"))) or [])} for s in g.get("scenes", [])
+            ],
+        }
+        for g in groups
+    ]
 
 
 @websocket_api.websocket_command({vol.Required("type"): "haven/subscribe_zigbee"})
@@ -374,7 +391,16 @@ def build_rooms(hass: HomeAssistant, bridge: Z2MBridge) -> dict[str, Any]:
 async def ws_rooms(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
     if (bridge := _bridge_or_error(hass, connection, msg["id"])) is None:
         return
-    connection.send_result(msg["id"], build_rooms(hass, bridge))
+    storage = get_storage(hass)
+    await storage.async_get_scene_looks()  # Szenen-Speicher laden
+    result = build_rooms(hass, bridge)
+    _, room_scenes = storage.scene_extras_cached()
+    for room in result["rooms"]:
+        # Räume ohne Gruppe: Szenen, die Haven selbst führt (Feature room_scenes)
+        room["scenes"] = (
+            [] if room.get("group") else [public_room_scene(s) for s in room_scene_list(room_scenes, room["area_id"])]
+        )
+    connection.send_result(msg["id"], result)
 
 
 # --- HA-Zuordnung (Bereich, Entities) ---------------------------------------------------
@@ -437,6 +463,20 @@ def _fail(connection: websocket_api.ActiveConnection, msg_id: int, err: Z2MError
 
 def _target(bridge: Z2MBridge, ieee: str) -> dict[str, Any]:
     return bridge.device_ref(ieee)
+
+
+async def _write(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any], run: Any
+) -> None:
+    """Wie ``_z2m_write`` für Befehle anderer Module: ``run(bridge)`` liefert das Ergebnis."""
+    if (bridge := _bridge_or_error(hass, connection, msg["id"])) is None:
+        return
+    try:
+        result = await run(bridge)
+    except Z2MError as err:
+        _fail(connection, msg["id"], err)
+        return
+    connection.send_result(msg["id"], result)
 
 
 def _z2m_write(handler):
@@ -820,13 +860,20 @@ _SCENE_LOCK = asyncio.Lock()
 @_z2m_write
 async def ws_zigbee_scene_store(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
     """Speichert den aktuellen Zustand der Gruppe als neue Szene oder überschreibt eine."""
-    group_id = msg["group_id"]
     look = validate_look(msg["look"]) if msg.get("look") is not None else None
+    return await async_group_scene_store(hass, bridge, msg["group_id"], msg.get("name"), msg.get("scene_id"), look)
+
+
+async def async_group_scene_store(
+    hass: HomeAssistant, bridge: Z2MBridge, group_id: int, name: Any, scene_id: int | None, look: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Zigbee-Teil einer Szene speichern (auch für ``haven/scenes/store``)."""
+    msg = {"scene_id": scene_id}
     storage = get_storage(hass)
     async with group_lock(group_id):
         async with _SCENE_LOCK:
             group = find_group(bridge.groups, group_id)
-            scene_id, name, payload = plan_store(group, msg.get("name"), msg.get("scene_id"))
+            scene_id, name, payload = plan_store(group, name, scene_id)
             await bridge.async_publish_set(group["friendly_name"], payload)
             confirmed = await bridge.async_wait_groups(stored(group_id, scene_id, name), SCENE_CONFIRM_TIMEOUT)
         # Soll (Feature scene_sync): die Zustände, die die Lampen gerade gespeichert haben
@@ -864,10 +911,13 @@ async def ws_zigbee_scene_store(hass: HomeAssistant, bridge: Z2MBridge, msg: dic
 @websocket_api.async_response
 @_z2m_write
 async def ws_zigbee_scene_rename(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
-    group_id, scene_id = msg["group_id"], msg["scene_id"]
+    return await async_group_scene_rename(bridge, msg["group_id"], msg["scene_id"], msg["name"])
+
+
+async def async_group_scene_rename(bridge: Z2MBridge, group_id: int, scene_id: int, new_name: Any) -> dict[str, Any]:
     async with group_lock(group_id), _SCENE_LOCK:
         group = find_group(bridge.groups, group_id)
-        name, payload = plan_rename(group, scene_id, msg["name"])
+        name, payload = plan_rename(group, scene_id, new_name)
         await bridge.async_publish_set(group["friendly_name"], payload)
         confirmed = await bridge.async_wait_groups(stored(group_id, scene_id, name), SCENE_CONFIRM_TIMEOUT)
     return {"ok": True, "group_id": group_id, "scene_id": scene_id, "name": name, "confirmed": confirmed}
@@ -884,7 +934,10 @@ async def ws_zigbee_scene_rename(hass: HomeAssistant, bridge: Z2MBridge, msg: di
 @websocket_api.async_response
 @_z2m_write
 async def ws_zigbee_scene_remove(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
-    group_id, scene_id = msg["group_id"], msg["scene_id"]
+    return await async_group_scene_remove(hass, bridge, msg["group_id"], msg["scene_id"])
+
+
+async def async_group_scene_remove(hass: HomeAssistant, bridge: Z2MBridge, group_id: int, scene_id: int) -> dict[str, Any]:
     async with group_lock(group_id), _SCENE_LOCK:
         group = find_group(bridge.groups, group_id)
         payload = plan_remove(group, scene_id)
@@ -892,8 +945,9 @@ async def ws_zigbee_scene_remove(hass: HomeAssistant, bridge: Z2MBridge, msg: di
         confirmed = await bridge.async_wait_groups(removed(group_id, scene_id), SCENE_CONFIRM_TIMEOUT)
     storage = get_storage(hass)
     key = scene_key(group_id, scene_id)
-    # Look, Soll und letzte Messung gehören zur Szene
+    # Look, Soll, letzte Messung und Zusatzgeräte gehören zur Szene
     for get, set_ in (
+        (storage.async_get_scene_extras, storage.async_set_scene_extras),
         (storage.async_get_scene_looks, storage.async_set_scene_looks),
         (storage.async_get_scene_targets, storage.async_set_scene_targets),
         (storage.async_get_scene_checks, storage.async_set_scene_checks),

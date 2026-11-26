@@ -83,6 +83,7 @@ class AutomationEngine:
         self._estimates: dict[str, tuple[float, RoomState]] = {}
         self._rooms_cache: tuple[float, dict[str, RoomTarget]] | None = None
         self._excluded: list[str] = []
+        self._locked: list[str] = []
         self._scene_step_at: dict[str, float] = {}
         self.motion = MotionRunner(self)
 
@@ -184,8 +185,18 @@ class AutomationEngine:
             return {}
         from .websocket_api import build_rooms  # noqa: PLC0415 - vermeidet Importzyklus
 
+        from .storage import get_storage  # noqa: PLC0415
+
         excluded = self._excluded
-        rooms = build_room_targets(build_rooms(self.hass, self.bridge)["rooms"], self.bridge.groups, excluded)
+        extras, room_scenes = get_storage(self.hass).scene_extras_cached()
+        rooms = build_room_targets(
+            build_rooms(self.hass, self.bridge)["rooms"],
+            self.bridge.groups,
+            excluded,
+            extras,
+            room_scenes,
+            self._locked,
+        )
         self._rooms_cache = (now, rooms)
         return rooms
 
@@ -198,6 +209,8 @@ class AutomationEngine:
         prefs = await get_storage(self.hass).async_get_prefs()
         # Gesperrte Geräte („immer an“) schaltet keine Automation.
         self._excluded = list(dict.fromkeys([*prefs.get("excluded_lights", []), *prefs.get("locked", [])]))
+        self._locked = list(prefs.get("locked", []))
+        await get_storage(self.hass).async_get_scene_looks()  # Szenen-Speicher laden
         self.invalidate_rooms()
 
     def _room_state(self, room: RoomTarget) -> RoomState:

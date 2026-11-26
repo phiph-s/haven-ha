@@ -229,10 +229,18 @@ class RoomTarget:
     scenes: list[dict[str, Any]] = field(default_factory=list)
     outside: list[str] = field(default_factory=list)
     group_excluded: list[str] = field(default_factory=list)
+    # Zusatzgeräte je Szenen-ID (``room_scenes``), Räume ohne Gruppe: alle Geräte
+    scene_devices: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    # Gesperrte Geräte („immer an“): Szenen schalten sie nicht
+    locked: list[str] = field(default_factory=list)
 
     @property
     def has_lights(self) -> bool:
         return bool(self.group or self.lights)
+
+    @property
+    def has_scenes(self) -> bool:
+        return bool(self.scenes) and (bool(self.group) or bool(self.scene_devices))
 
     @property
     def members(self) -> list[str]:
@@ -255,9 +263,22 @@ class RoomTarget:
 
 
 def build_room_targets(
-    rooms: list[dict[str, Any]], groups: list[dict[str, Any]], excluded: list[str] | set[str] = ()
+    rooms: list[dict[str, Any]],
+    groups: list[dict[str, Any]],
+    excluded: list[str] | set[str] = (),
+    extras: dict[str, Any] | None = None,
+    room_scenes: dict[str, Any] | None = None,
+    locked: list[str] | set[str] = (),
 ) -> dict[str, RoomTarget]:
-    """Aus ``haven/rooms`` (``rooms``) und ``bridge.groups`` (roh) die Ziele je Bereich."""
+    """Aus ``haven/rooms`` (``rooms``) und ``bridge.groups`` (roh) die Ziele je Bereich.
+
+    ``extras`` / ``room_scenes``: gespeicherte Zusatzgeräte und Szenen von Räumen
+    ohne Gruppe (siehe ``room_scenes``).
+    """
+    from .room_scenes import room_scene_list  # noqa: PLC0415
+
+    extras = extras or {}
+    room_scenes = room_scenes or {}
     excluded_set = set(excluded)
     by_id = {g.get("id"): g for g in groups if isinstance(g, dict)}
     out: dict[str, RoomTarget] = {}
@@ -284,6 +305,16 @@ def build_room_targets(
 
             outside = [l for l in lights if not in_group(l)]
             group_excluded = [l for l in room.get("lights", []) if l in excluded_set and in_group(l)]
+        scene_devices: dict[int, list[dict[str, Any]]] = {}
+        if group:
+            for s in scenes:
+                devices = extras.get(f"{group.get('id')}:{s['id']}")
+                if isinstance(devices, list) and devices:
+                    scene_devices[s["id"]] = devices
+        else:
+            own = room_scene_list(room_scenes, room["area_id"])
+            scenes = [{"id": s["id"], "name": s.get("name")} for s in own]
+            scene_devices = {s["id"]: list(s.get("devices") or []) for s in own}
         out[room["area_id"]] = RoomTarget(
             area_id=room["area_id"],
             name=room.get("name") or room["area_id"],
@@ -294,6 +325,8 @@ def build_room_targets(
             scenes=scenes,
             outside=outside,
             group_excluded=group_excluded,
+            scene_devices=scene_devices,
+            locked=sorted(set(locked)),
         )
     return out
 
@@ -776,7 +809,7 @@ def _plan_off(room: RoomTarget, state: RoomState, base: str, *, outside: bool = 
 def _plan_on(
     options: dict[str, Any], room: RoomTarget, state: RoomState, base: str, last_scene: int | None
 ) -> Plan:
-    if options.get("on_action") == "scene" and room.group:
+    if options.get("on_action") == "scene" and room.scenes:
         scene = options.get("on_scene")
         if scene in [s["id"] for s in room.scenes]:
             plan = _plan_scene(room, scene, base)
@@ -796,14 +829,19 @@ def _plan_on(
 
 
 def _plan_scene(room: RoomTarget, scene: Any, base: str) -> Plan:
-    if not room.group or not _is_int(scene) or scene not in [s["id"] for s in room.scenes]:
+    """Szene aufrufen: Zigbee-Teil über die Gruppe, Zusatzgeräte über HA."""
+    from .room_scenes import plan_devices  # noqa: PLC0415
+
+    if not _is_int(scene) or scene not in [s["id"] for s in room.scenes]:
         return Plan(note="Szene fehlt")
-    return Plan(
-        "scene",
-        mqtt=[(_group_topic(base, room.group), {"scene_recall": scene})],
-        scene=scene,
-        expected=RoomState(True, None, []),
-    )
+    devices = room.scene_devices.get(scene, [])
+    if not room.group and not devices:
+        return Plan(note="Szene fehlt")
+    plan = Plan("scene", scene=scene, expected=RoomState(True, None, []))
+    if room.group:
+        plan.mqtt.append((_group_topic(base, room.group), {"scene_recall": scene}))
+    plan.services += plan_devices(devices, skip=set(room.locked))
+    return plan
 
 
 def plan_to_json(plan: Plan) -> dict[str, Any]:

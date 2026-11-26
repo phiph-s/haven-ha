@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 import re
 from typing import Any
 
-from .automations import Plan, RoomState, RoomTarget, _group_topic, _is_int, _is_num, _plan_off
+from .automations import Plan, RoomState, RoomTarget, _group_topic, _is_int, _is_num, _plan_off, _plan_scene
 
 # --- Konstanten ---------------------------------------------------------------------
 
@@ -548,10 +548,13 @@ def plan_command(cmd: Command, room: RoomTarget, state: RoomState, base_topic: s
         entity = light.get("scene_entity")
         if entity:
             return Plan("on", services=[("scene", "turn_on", {"entity_id": entity, "transition": tr})], expected=RoomState(True, None, []))
-        scene = light.get("scene")
-        if room.group and scene in [s["id"] for s in room.scenes]:
-            return Plan("on", mqtt=[(_group_topic(base_topic, room.group), {"scene_recall": scene})], scene=scene, expected=RoomState(True, None, []))
-        return Plan(note="Szene fehlt")
+        plan = _plan_scene(room, light.get("scene"), base_topic)
+        if plan.note is None:
+            plan.action = "on"
+            return plan
+        # Szene gibt es nicht mehr (gelöscht, andere Raumgruppe): trotzdem Licht,
+        # mit Standardhelligkeit, statt im Dunkeln zu stehen.
+        light = {"transition": tr}
     b = int(light.get("brightness") or 204)
     ct = light.get("color_temp")
     exp = RoomState(True, b, [])

@@ -232,6 +232,21 @@ Szenen liegen in Z2M auf den Geräten einer Gruppe. Haven vergibt die IDs selbst
 
 Ungeprüft auf echtem HA: ob Z2M nach jeder Szenenänderung `bridge/groups` neu sendet (sonst `confirmed: false` nach 5 s) und wie ausgeschaltete Lampen in der Szene landen.
 
+### Szenen je Raum mit Zusatzgeräten: `haven/scenes/*` (Feature `room_scenes`, ab 0.6.40)
+Eine Szene kann neben der Zigbee-Szene der Raumgruppe weitere Geräte des Raums speichern: Lampen außerhalb der Gruppe (WLAN, Matter, Govee) und auf Wunsch Steckdosen und Schalter (`switch.*`). Räume ohne Z2M-Gruppe bekommen eigene Szenen, die nur Haven führt (IDs 0 bis 255 je Raum). Gesperrte Geräte („immer an“) schaltet keine Szene.
+
+| Befehl | Payload | Antwort |
+|---|---|---|
+| `haven/scenes/store` (Admin) | `{area_id, scene_id?, name?, look?, devices: [entity_id]}` | wie `scene_store`, dazu `area_id`, `devices` (Anzahl); ohne Gruppe `group_id: null` |
+| `haven/scenes/recall` | `{area_id, scene_id}` | `{ok}` |
+| `haven/scenes/rename` (Admin) | `{area_id, scene_id, name}` | `{ok, name, ...}` |
+| `haven/scenes/remove` (Admin) | `{area_id, scene_id}` | `{ok, ...}` |
+| `haven/scenes/set_devices` (Admin) | `{area_id, scene_id, devices: [entity_id]}` (die, die bleiben) | `{ok, devices}` |
+
+Beim Speichern liest Haven den aktuellen Zustand der `devices` aus HA (`on`, bei Lampen `brightness` in %, `kelvin` oder `rgb`). Aufrufen: erst `scene_recall` an die Gruppe, dann `light.turn_on`/`turn_off` und `switch.turn_on`/`turn_off`. Drehregler und Bewegungslicht rufen Szenen genauso auf. `haven/zigbee/groups` nennt an jeder Szene `devices`, `haven/rooms` an Räumen ohne Gruppe `scenes: [{id, name, look, devices}]` und an jedem Raum `outside_lights` und `switches` (mögliche Zusatzgeräte). Nach Änderungen feuert `haven_data_updated` mit `kind: "scenes"`. Fehler: `invalid_format`, `not_found`, `name_taken`, `no_lights` (Szene ohne Gruppe und ohne Gerät).
+
+Bewegungslicht mit einer Szene, die es nicht mehr gibt (gelöscht, andere Raumgruppe): ab 0.6.40 geht das Licht mit Standardhelligkeit an statt gar nicht.
+
 ### Szenen-Abgleich: `scene_check`, `scene_adopt`, `scene_repair` (Feature `scene_sync`)
 Z2M kann Szenen nicht von den Lampen zurücklesen. Lampen, die später in die Gruppe kamen, beim Speichern offline waren oder neu gekoppelt wurden, kennen eine Szene nicht. Haven merkt sich deshalb je Szene ein **Soll** (Zustand jeder Mitgliedslampe) und misst Szenen, indem es sie aufruft.
 

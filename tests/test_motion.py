@@ -419,8 +419,17 @@ def test_plan_ha_scene_and_fallback_services():
     assert p.services == [("scene", "turn_on", {"entity_id": "scene.bad_nacht", "transition": 3.0})]
     p = mo.plan_command(mo.Command("on", light={"mode": "brightness", "brightness": 50, "color_temp": 2700}), room, auto.RoomState(False, 0))
     assert p.services[0][:2] == ("light", "turn_on") and p.services[0][2]["color_temp_kelvin"] == 2700
+    # Szene fehlt: trotzdem Licht an (Standardhelligkeit) statt nichts
     p = mo.plan_command(mo.Command("on", light={"mode": "scene", "scene": 1}), room, auto.RoomState(False, 0))
-    assert p.empty and p.note == "Szene fehlt"
+    assert p.action == "on" and p.services[0][2]["entity_id"] == ["light.bad_1", "light.bad_2"]
+    # Raum ohne Gruppe mit Haven-Szene: Geräte über HA
+    room = auto.RoomTarget(
+        "bad", "Bad", lights=["light.bad_1"], scenes=[{"id": 0, "name": "Nacht"}],
+        scene_devices={0: [{"entity_id": "light.bad_1", "on": True, "brightness": 10}]},
+    )
+    p = mo.plan_command(mo.Command("on", light={"mode": "scene", "scene": 0}), room, auto.RoomState(False, 0))
+    assert p.action == "on" and p.scene == 0
+    assert p.services == [("light", "turn_on", {"entity_id": ["light.bad_1"], "brightness_pct": 10, "transition": 0.0})]
     assert mo.plan_command(mo.Command("off"), room, auto.RoomState(True, 10)).services[0][1] == "turn_off"
 
 

@@ -21,7 +21,7 @@ from .const import DOMAIN, STORAGE_VERSION
 
 _KEY = f"{DOMAIN}_storage"
 # Teile von haven.scenes: Looks, Soll und letzte Messung je Szene
-_SCENE_PARTS = ("looks", "targets", "checks")
+_SCENE_PARTS = ("looks", "targets", "checks", "extras", "room_scenes")
 
 
 def _versioned(store: Store[dict[str, Any]], what: str) -> VersionedDoc:
@@ -140,6 +140,25 @@ class HavenStorage:
 
     async def async_set_scene_checks(self, checks: dict[str, Any]) -> None:
         await self._async_set_scene_part("checks", checks)
+
+    async def async_get_scene_extras(self) -> dict[str, Any]:
+        """Zusatzgeräte der Gruppenszenen (siehe ``room_scenes``): ``{"<g>:<s>": [device]}``."""
+        return (await self._async_scene_doc())["extras"]
+
+    async def async_set_scene_extras(self, extras: dict[str, Any]) -> None:
+        await self._async_set_scene_part("extras", extras)
+
+    async def async_get_room_scenes(self) -> dict[str, Any]:
+        """Szenen der Räume ohne Gruppe: ``{area_id: [{id, name, look, devices, stored_at}]}``."""
+        return (await self._async_scene_doc())["room_scenes"]
+
+    async def async_set_room_scenes(self, room_scenes: dict[str, Any]) -> None:
+        await self._async_set_scene_part("room_scenes", room_scenes)
+
+    def scene_extras_cached(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """``(extras, room_scenes)`` ohne Laden, leer bis zum ersten Laden."""
+        doc = self._scene_doc or {}
+        return doc.get("extras", {}), doc.get("room_scenes", {})
 
     def scene_sync_cached(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """``(targets, checks)`` ohne Laden, leer bis zum ersten Laden."""

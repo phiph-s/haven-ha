@@ -121,6 +121,10 @@ def assemble_rooms(
             "zigbee_lights": [],
             # Licht-Entity -> IEEE (nur Zigbee), für Lampen außerhalb der Gruppe
             "light_ieee": {},
+            # Lampen außerhalb der Raumgruppe (alle, wenn es keine gibt) und
+            # Schalter/Steckdosen: mögliche Zusatzgeräte einer Szene
+            "outside_lights": [],
+            "switches": [],
             "climate": {"temperature": [], "humidity": []},
             "motion": [],
             "group": None,
@@ -206,13 +210,21 @@ def assemble_rooms(
             room["climate"][device_class].append(ent.entity_id)
         elif ent.domain == "binary_sensor" and device_class in MOTION_CLASSES:
             room["motion"].append(ent.entity_id)
+        elif ent.domain == "switch" and device is not None and not device.service:
+            room["switches"].append(ent.entity_id)
 
     for area_id, room in rooms.items():
         room["group"] = bridge.match_group(set(room["zigbee_lights"]))
         if room["group"] and room["group"].get("friendly_name"):
             room["group_entity"] = z2m_group_entities.get(str(room["group"]["friendly_name"]).casefold())
-        for key in ("lights", "zigbee_lights", "motion"):
+        for key in ("lights", "zigbee_lights", "motion", "switches"):
             room[key] = sorted(set(room[key]))
+        missing = set((room["group"] or {}).get("missing") or ())
+        room["outside_lights"] = [
+            l
+            for l in room["lights"]
+            if not room["group"] or l not in room["light_ieee"] or room["light_ieee"][l] in missing
+        ]
         for key in CLIMATE_CLASSES:
             room["climate"][key] = sorted(set(room["climate"][key]))
         room["light_groups"].sort(key=lambda g: g["entity_id"])
