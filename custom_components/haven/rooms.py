@@ -119,6 +119,8 @@ def assemble_rooms(
             "lights": [],
             "light_groups": [],
             "zigbee_lights": [],
+            # Licht-Entity -> IEEE (nur Zigbee), für Lampen außerhalb der Gruppe
+            "light_ieee": {},
             "climate": {"temperature": [], "humidity": []},
             "motion": [],
             "group": None,
@@ -199,6 +201,7 @@ def assemble_rooms(
             room["lights"].append(ent.entity_id)
             if device and device.ieee and device.ieee in bridge.devices:
                 room["zigbee_lights"].append(device.ieee)
+                room["light_ieee"][ent.entity_id] = device.ieee
         elif ent.domain == "sensor" and device_class in CLIMATE_CLASSES:
             room["climate"][device_class].append(ent.entity_id)
         elif ent.domain == "binary_sensor" and device_class in MOTION_CLASSES:

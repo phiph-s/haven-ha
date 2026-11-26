@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 from pathlib import Path
@@ -93,6 +94,7 @@ def test_room_targets(targets):
     assert salon.group == "ZGSalon"
     assert [s["id"] for s in salon.scenes] == list(range(8))
     assert "light.lampe_salon" not in salon.lights  # ausgenommen
+    assert salon.group_excluded == ["light.lampe_salon"]  # steckt aber in der Gruppe
     assert rooms["kochbereich"].group == "ZGKochbereich" and rooms["kochbereich"].scenes == []
 
 
@@ -109,8 +111,14 @@ def test_room_state_prefers_group_entity():
 # --- Planung ------------------------------------------------------------------------------
 
 
+def _salon(rooms):
+    """Salon ohne ausgenommene Lampe in der Gruppe (sonst dimmt Haven einzeln)."""
+    return dataclasses.replace(rooms["salon"], group_excluded=[])
+
+
 def test_plan_rotate_group(targets):
     _, rooms = targets
+    rooms = {**rooms, "salon": _salon(rooms)}
     plan = auto.plan_gesture(_knob(), auto.Gesture("rotate", 1, 1), rooms["salon"], auto.RoomState(True, 100))
     assert plan.mqtt == [("zigbee2mqtt/ZGSalon/set", {"brightness_step": 35, "transition": 0.2})]
     plan = auto.plan_gesture(_knob(), auto.Gesture("rotate", -1, 2), rooms["salon"], auto.RoomState(True, 200), base_topic="z2m")
@@ -120,7 +128,7 @@ def test_plan_rotate_group(targets):
 
 def test_plan_rotate_respects_minimum_and_off_at_min(targets):
     _, rooms = targets
-    salon = rooms["salon"]
+    salon = _salon(rooms)
     down = auto.Gesture("rotate", -1, 1)
     plan = auto.plan_gesture(_knob(min_brightness=20), down, salon, auto.RoomState(True, 40))
     assert plan.mqtt[0][1]["brightness_step"] == -20
@@ -385,3 +393,107 @@ def test_lights_action_skips_broken_entries(targets):
     knob = _knob(gestures={"double": {"action": "lights", "lights": [{"entity_id": "light.a", "on": True}, {"entity_id": "x"}]}})
     plan = auto.plan_gesture(knob, auto.Gesture("double"), rooms["salon"], auto.RoomState(None, None))
     assert plan.services == [("light", "turn_on", {"entity_id": ["light.a"], "transition": 0.2})]
+
+
+# --- Lampen außerhalb der Gruppe, Ausnahmen beim Dimmen, Szenen per Drehen ------------------
+
+
+def _mixed_room(**kw):
+    """Gruppe mit light.a/light.b, dazu light.wlan (ohne Zigbee) außerhalb."""
+    return auto.RoomTarget(
+        "r", "R", group="G", group_entity="light.g", lights=["light.a", "light.b", "light.wlan"],
+        scenes=[{"id": i, "name": str(i)} for i in range(3)], outside=["light.wlan"], **kw,
+    )
+
+
+def test_room_targets_outside_and_group_excluded():
+    rooms = auto.build_room_targets(
+        [
+            {
+                "area_id": "r", "name": "R", "lights": ["light.a", "light.b", "light.c", "light.wlan"],
+                "light_ieee": {"light.a": "0x1", "light.b": "0x2", "light.c": "0x3"},
+                "group": {"id": 5, "friendly_name": "G", "missing": ["0x3"]},
+            }
+        ],
+        [{"id": 5, "friendly_name": "G", "scenes": []}],
+        ["light.b"],
+    )
+    r = rooms["r"]
+    assert r.lights == ["light.a", "light.c", "light.wlan"]
+    assert r.outside == ["light.c", "light.wlan"]  # fehlt in der Gruppe bzw. kein Zigbee
+    assert r.members == ["light.a"]
+    assert r.group_excluded == ["light.b"]
+
+
+def test_room_state_counts_outside_lights():
+    room = _mixed_room()
+    states = {"light.g": {"state": "off", "attributes": {}}, "light.wlan": {"state": "on", "attributes": {"brightness": 90}}}
+    assert auto.room_state_from(states, room) == auto.RoomState(False, 0, ["light.wlan"])
+    s = auto.room_state_from(states, room, with_outside=True)
+    assert (s.on, s.brightness, s.group_on) == (True, 90, False)
+
+
+def test_off_and_toggle_reach_outside_lights():
+    room = _mixed_room()
+    single = auto.Gesture("single")
+    on_state = auto.RoomState(True, 90, ["light.wlan"], group_on=False)
+    plan = auto.plan_gesture(_knob(), single, room, on_state)
+    assert plan.mqtt[0][1] == {"state": "OFF"}
+    assert plan.services == [("light", "turn_off", {"entity_id": ["light.wlan"]})]
+    plan = auto.plan_gesture(_knob(), single, room, auto.RoomState(False, 0, [], group_on=False))
+    assert plan.mqtt[0][1] == {"state": "ON"}
+    assert plan.services == [("light", "turn_on", {"entity_id": ["light.wlan"]})]
+
+
+def test_rotate_dims_outside_lights_too():
+    room = _mixed_room()
+    right = auto.Gesture("rotate", 1, 1)
+    both = auto.plan_gesture(_knob(), right, room, auto.RoomState(True, 100, ["light.a", "light.wlan"], group_on=True))
+    assert both.mqtt == [("zigbee2mqtt/G/set", {"brightness_step": 35, "transition": 0.2})]
+    assert both.services == [("light", "turn_on", {"entity_id": ["light.wlan"], "brightness_step": 35, "transition": 0.2})]
+    # Nur die WLAN-Lampe brennt: die Gruppe bleibt aus
+    only = auto.plan_gesture(_knob(), right, room, auto.RoomState(True, 100, ["light.wlan"], group_on=False))
+    assert only.mqtt == [] and only.services[0][2]["entity_id"] == ["light.wlan"]
+    # Alles aus und hochdrehen: beide an
+    up = auto.plan_gesture(_knob(), right, room, auto.RoomState(False, 0, [], group_on=False))
+    assert up.mqtt[0][1]["state"] == "ON" and up.services[0][2]["entity_id"] == ["light.wlan"]
+
+
+def test_dim_exclude_switches_to_single_lights():
+    room = _mixed_room()
+    knob = _knob(dim_exclude=["light.b"])
+    state = auto.RoomState(True, 100, ["light.a", "light.b", "light.wlan"], group_on=True)
+    plan = auto.plan_gesture(knob, auto.Gesture("rotate", -1, 1), room, state)
+    assert plan.mqtt == []
+    assert plan.services == [
+        ("light", "turn_on", {"entity_id": ["light.a", "light.wlan"], "brightness_step": -35, "transition": 0.2})
+    ]
+    # Nur die WLAN-Lampe ausgenommen: Gruppe weiter, WLAN bleibt
+    knob = _knob(dim_exclude=["light.wlan"])
+    plan = auto.plan_gesture(knob, auto.Gesture("rotate", -1, 1), room, state)
+    assert plan.mqtt and plan.services == []
+    # Global ausgenommene Lampe in der Gruppe: einzeln
+    plan = auto.plan_gesture(_knob(), auto.Gesture("rotate", -1, 1), _mixed_room(group_excluded=["light.x"]), state)
+    assert plan.mqtt == [] and plan.services[0][2]["entity_id"] == ["light.a", "light.b", "light.wlan"]
+    # Aus bleibt Aus für alle
+    plan = auto.plan_gesture(_knob(dim_exclude=["light.b"]), auto.Gesture("single"), room, state)
+    assert plan.mqtt[0][1] == {"state": "OFF"}
+
+
+def test_dim_exclude_validation():
+    base = {"room_area_id": "r", "devices": ["0x1"]}
+    assert auto.validate_shape({**base, "options": {"dim_exclude": ["light.a"]}}) == []
+    assert auto.validate_shape({**base, "options": {"dim_exclude": ["switch.a"]}})
+    assert auto.validate_shape({**base, "options": {"dim_exclude": "light.a"}})
+
+
+def test_rotate_scene_step():
+    room = _mixed_room()
+    knob = _knob(gestures={"rotate": {"action": "scene_step"}})
+    assert auto.validate_shape({"room_area_id": "r", "devices": ["0x1"], "options": knob["options"]}) == []
+    right, left = auto.Gesture("rotate", 1, 3), auto.Gesture("rotate", -1, 1)
+    assert auto.plan_gesture(knob, right, room, auto.RoomState(), last_scene=0).scene == 1  # eine, nicht drei
+    assert auto.plan_gesture(knob, left, room, auto.RoomState(), last_scene=0).scene == 2  # Umlauf rückwärts
+    assert auto.plan_gesture(knob, left, room, auto.RoomState()).scene == 2  # unbekannt: die letzte
+    assert auto.plan_gesture(knob, right, room, auto.RoomState()).scene == 0
+    assert auto.plan_gesture(knob, right, auto.RoomTarget("x", "X", lights=["light.a"]), auto.RoomState()).empty

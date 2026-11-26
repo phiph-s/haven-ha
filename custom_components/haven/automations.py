@@ -34,8 +34,10 @@ GESTURES = ("rotate", "single", "double", "hold")
 PRESS_ACTIONS = ("none", "toggle", "next_scene", "scene", "off", "lights")
 # Höchstens so viele Lampen in einer Aktion „lights“.
 MAX_LIGHT_TARGETS = 50
-# Aktionen für Drehen
-ROTATE_ACTIONS = ("none", "brightness")
+# Aktionen für Drehen: dimmen oder Szenen vor/zurück
+ROTATE_ACTIONS = ("none", "brightness", "scene_step")
+# Drehen mit „scene_step“: so lange nach einem Szenenwechsel zählt Weiterdrehen nicht
+SCENE_STEP_COOLDOWN = 0.6
 ON_ACTIONS = ("last", "scene")
 
 DEFAULT_STEP = 35  # von 255, wie bisher in den HA-Automationen
@@ -68,6 +70,7 @@ def default_options() -> dict[str, Any]:
         "transition": DEFAULT_TRANSITION,
         "min_brightness": DEFAULT_MIN_BRIGHTNESS,
         "off_at_min": False,
+        "dim_exclude": [],  # Lampen, die beim Drehen nicht mitgedimmt werden
     }
 
 
@@ -211,6 +214,10 @@ class RoomTarget:
     ``group``: Friendly-Name der Z2M-Raumgruppe (``None`` = Fallback über HA-Dienste).
     ``lights``: gesteuerte Lichter des Raums (ohne ausgenommene), für den Fallback.
     ``scenes``: Szenen der Gruppe ``[{id, name}]`` in Z2M-Reihenfolge.
+    ``outside``: Lichter aus ``lights``, die nicht in der Gruppe sind (WLAN, Matter,
+    Zigbee-Lampen, die in der Gruppe fehlen). Haven schaltet sie über HA mit.
+    ``group_excluded``: ausgenommene Lichter, die trotzdem in der Gruppe stecken.
+    Solange es sie gibt, dimmt Haven nicht über die Gruppe.
     """
 
     area_id: str
@@ -220,10 +227,20 @@ class RoomTarget:
     group_entity: str | None = None
     lights: list[str] = field(default_factory=list)
     scenes: list[dict[str, Any]] = field(default_factory=list)
+    outside: list[str] = field(default_factory=list)
+    group_excluded: list[str] = field(default_factory=list)
 
     @property
     def has_lights(self) -> bool:
         return bool(self.group or self.lights)
+
+    @property
+    def members(self) -> list[str]:
+        """Lichter aus ``lights``, die über die Gruppe laufen."""
+        if not self.group:
+            return []
+        outside = set(self.outside)
+        return [l for l in self.lights if l not in outside]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -255,14 +272,28 @@ def build_room_targets(
             ),
             key=lambda s: s["id"],
         )
+        lights = [l for l in room.get("lights", []) if l not in excluded_set]
+        outside: list[str] = []
+        group_excluded: list[str] = []
+        if group:
+            ieee = room.get("light_ieee") or {}
+            missing = set(group.get("missing") or ())
+
+            def in_group(entity_id: str) -> bool:
+                return entity_id in ieee and ieee[entity_id] not in missing
+
+            outside = [l for l in lights if not in_group(l)]
+            group_excluded = [l for l in room.get("lights", []) if l in excluded_set and in_group(l)]
         out[room["area_id"]] = RoomTarget(
             area_id=room["area_id"],
             name=room.get("name") or room["area_id"],
             group=(group or {}).get("friendly_name"),
             group_id=(group or {}).get("id"),
             group_entity=room.get("group_entity"),
-            lights=[l for l in room.get("lights", []) if l not in excluded_set],
+            lights=lights,
             scenes=scenes,
+            outside=outside,
+            group_excluded=group_excluded,
         )
     return out
 
@@ -274,12 +305,17 @@ class RoomState:
     on: bool | None = None
     brightness: int | None = None  # 0..255
     lights_on: list[str] = field(default_factory=list)
+    # Nur mit ``with_outside``: Zustand der Gruppe allein (``None`` = unbekannt/keine)
+    group_on: bool | None = None
 
 
-def room_state_from(states: dict[str, dict[str, Any]], target: RoomTarget) -> RoomState:
+def room_state_from(
+    states: dict[str, dict[str, Any]], target: RoomTarget, *, with_outside: bool = False
+) -> RoomState:
     """``states``: entity_id -> ``{"state": "on", "attributes": {...}}`` (HA-Zustände).
 
-    Mit Gruppen-Entity zählt sie, sonst das hellste Licht.
+    Mit Gruppen-Entity zählt sie, sonst das hellste Licht. ``with_outside``: Lichter
+    außerhalb der Gruppe zählen mit (der Raum ist an, wenn eins davon brennt).
     """
     def _bri(s: dict[str, Any]) -> int | None:
         b = (s.get("attributes") or {}).get("brightness")
@@ -289,7 +325,13 @@ def room_state_from(states: dict[str, dict[str, Any]], target: RoomTarget) -> Ro
     if target.group_entity and target.group_entity in states:
         s = states[target.group_entity]
         if s.get("state") in ("on", "off"):
-            return RoomState(s["state"] == "on", _bri(s) if s["state"] == "on" else 0, lights_on)
+            group_on = s["state"] == "on"
+            if not with_outside:
+                return RoomState(group_on, _bri(s) if group_on else 0, lights_on)
+            lit = [states[l] for l in target.outside if (states.get(l) or {}).get("state") == "on"]
+            bris = [b for b in [_bri(s) if group_on else None, *map(_bri, lit)] if b is not None]
+            on = group_on or bool(lit)
+            return RoomState(on, (max(bris) if bris else None) if on else 0, lights_on, group_on)
     known = [states[l] for l in target.lights if (states.get(l) or {}).get("state") in ("on", "off")]
     if not known:
         return RoomState(None, None, lights_on)
@@ -405,6 +447,13 @@ def validate_shape(doc: Any) -> list[str]:
         errors.append("on_action muss last oder scene sein")
     elif opts.get("on_action") == "scene" and not _is_int(opts.get("on_scene")):
         errors.append("Beim Einschalten: Szene fehlt")
+    dim_exclude = opts.get("dim_exclude")
+    if dim_exclude is not None and (
+        not isinstance(dim_exclude, list)
+        or len(dim_exclude) > MAX_LIGHT_TARGETS
+        or not all(isinstance(l, str) and l.startswith("light.") for l in dim_exclude)
+    ):
+        errors.append("dim_exclude muss eine Liste von Lampen sein")
     for key, lo, hi in (("step", 1, 255), ("min_brightness", 1, 254)):
         if key in opts and (not _is_int(opts[key]) or not lo <= opts[key] <= hi):
             errors.append(f"{key} muss zwischen {lo} und {hi} liegen")
@@ -482,13 +531,14 @@ def scene_cycle(options: dict[str, Any], room: RoomTarget) -> list[int]:
     return [s for s in dict.fromkeys(chosen) if s in available]
 
 
-def next_scene(cycle: list[int], last_scene: int | None) -> int | None:
-    """Szene nach ``last_scene`` mit Umlauf. Unbekannt oder ``None``: die erste."""
+def next_scene(cycle: list[int], last_scene: int | None, step: int = 1) -> int | None:
+    """Szene nach (``step`` -1: vor) ``last_scene`` mit Umlauf. Unbekannt oder ``None``:
+    die erste (rückwärts die letzte)."""
     if not cycle:
         return None
     if last_scene in cycle:
-        return cycle[(cycle.index(last_scene) + 1) % len(cycle)]
-    return cycle[0]
+        return cycle[(cycle.index(last_scene) + step) % len(cycle)]
+    return cycle[0] if step > 0 else cycle[-1]
 
 
 # --- Planung ------------------------------------------------------------------------------
@@ -541,15 +591,21 @@ def plan_gesture(
     binding = gesture_action(options, gesture)
     action = binding.get("action", "none")
     if gesture.kind == "rotate":
+        if action == "scene_step":
+            # Eine Szene je Drehbewegung, egal wie viele Rastungen
+            target = next_scene(scene_cycle(options, room), last_scene, 1 if gesture.direction > 0 else -1)
+            if target is None:
+                return Plan(note="keine Szenen")
+            return _plan_scene(room, target, base_topic)
         if action != "brightness":
             return Plan(note="nicht belegt")
         return _plan_brightness(options, gesture.direction * gesture.steps, room, state, base_topic)
     if action == "toggle":
         if state.on:
-            return _plan_off(room, state, base_topic)
+            return _plan_off(room, state, base_topic, outside=True)
         return _plan_on(options, room, state, base_topic, last_scene)
     if action == "off":
-        return _plan_off(room, state, base_topic)
+        return _plan_off(room, state, base_topic, outside=True)
     if action == "next_scene":
         target = next_scene(scene_cycle(options, room), last_scene)
         if target is None:
@@ -655,7 +711,7 @@ def _plan_brightness(
         if current is not None:
             if current <= minimum:
                 if options.get("off_at_min"):
-                    return _plan_off(room, state, base)
+                    return _plan_off(room, state, base, outside=True)
                 return Plan(note="Minimum")
             new = max(minimum, current + delta)
             delta = new - current
@@ -665,24 +721,53 @@ def _plan_brightness(
         if current is not None:
             delta = min(254, current + delta) - current
     expected = RoomState(True, None if current is None else max(0, min(254, current + delta)), state.lights_on)
-    if room.group:
-        payload: dict[str, Any] = {"brightness_step": delta, "transition": transition}
+    excluded = set(options.get("dim_exclude") or ())
+    if room.group and not room.group_excluded and not excluded & set(room.members):
+        plan = Plan("brightness", expected=expected)
+        extra = [l for l in room.outside if l not in excluded]
         if delta > 0 and state.on is False:
             # Aus und hochdrehen: mit kleiner Helligkeit einschalten statt der letzten
-            payload = {"state": "ON", "brightness": max(minimum, min(254, delta)), "transition": transition}
-            expected = RoomState(True, payload["brightness"], state.lights_on)
-        return Plan("brightness", mqtt=[(_group_topic(base, room.group), payload)], expected=expected)
-    targets = state.lights_on or (room.lights if delta > 0 else [])
+            bri = max(minimum, min(254, delta))
+            plan.mqtt.append(
+                (_group_topic(base, room.group), {"state": "ON", "brightness": bri, "transition": transition})
+            )
+            if extra:
+                plan.services.append(
+                    ("light", "turn_on", {"entity_id": extra, "brightness": bri, "transition": transition})
+                )
+            plan.expected = RoomState(True, bri, state.lights_on)
+            return plan
+        # Gruppe aus, nur Lampen außerhalb brennen: die Gruppe nicht anfassen
+        if state.group_on is not False:
+            plan.mqtt.append(
+                (_group_topic(base, room.group), {"brightness_step": delta, "transition": transition})
+            )
+        lit = [l for l in extra if l in state.lights_on]
+        if lit:
+            plan.services.append(
+                ("light", "turn_on", {"entity_id": lit, "brightness_step": delta, "transition": transition})
+            )
+        if plan.empty:
+            return Plan(note="keine Lichter")
+        return plan
+    # Ohne Gruppe oder mit ausgenommenen Lampen in der Gruppe: einzeln über HA
+    targets = [l for l in state.lights_on if l not in excluded] or (
+        [l for l in room.lights if l not in excluded] if delta > 0 else []
+    )
     if not targets:
         return Plan(note="keine Lichter")
     data = {"entity_id": list(targets), "brightness_step": delta, "transition": transition}
     return Plan("brightness", services=[("light", "turn_on", data)], expected=expected)
 
 
-def _plan_off(room: RoomTarget, state: RoomState, base: str) -> Plan:
+def _plan_off(room: RoomTarget, state: RoomState, base: str, *, outside: bool = False) -> Plan:
+    """Raum aus. ``outside``: Lichter außerhalb der Gruppe auch (über HA)."""
     expected = RoomState(False, 0, [])
     if room.group:
-        return Plan("off", mqtt=[(_group_topic(base, room.group), {"state": "OFF"})], expected=expected)
+        plan = Plan("off", mqtt=[(_group_topic(base, room.group), {"state": "OFF"})], expected=expected)
+        if outside and room.outside:
+            plan.services.append(("light", "turn_off", {"entity_id": list(room.outside)}))
+        return plan
     if not room.lights:
         return Plan(note="keine Lichter")
     return Plan("off", services=[("light", "turn_off", {"entity_id": list(room.lights)})], expected=expected)
@@ -700,7 +785,10 @@ def _plan_on(
     if room.group:
         # Zustand unbekannt: umschalten wie bisher in HA, sonst eindeutig einschalten
         payload = {"state": "TOGGLE"} if state.on is None else {"state": "ON"}
-        return Plan("on", mqtt=[(_group_topic(base, room.group), payload)], expected=RoomState(True, None, []))
+        plan = Plan("on", mqtt=[(_group_topic(base, room.group), payload)], expected=RoomState(True, None, []))
+        if room.outside:
+            plan.services.append(("light", "turn_on", {"entity_id": list(room.outside)}))
+        return plan
     if not room.lights:
         return Plan(note="keine Lichter")
     service = "toggle" if state.on is None else "turn_on"

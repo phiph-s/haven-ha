@@ -22,6 +22,7 @@ from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
 from .automations import (
+    SCENE_STEP_COOLDOWN,
     STORE_KEY,
     STORE_MINOR_VERSION,
     STORE_VERSION,
@@ -35,6 +36,7 @@ from .automations import (
     device_owner,
     empty_store,
     event_data,
+    gesture_action,
     migrate_store,
     mqtt_payload,
     normalize_action,
@@ -81,6 +83,7 @@ class AutomationEngine:
         self._estimates: dict[str, tuple[float, RoomState]] = {}
         self._rooms_cache: tuple[float, dict[str, RoomTarget]] | None = None
         self._excluded: list[str] = []
+        self._scene_step_at: dict[str, float] = {}
         self.motion = MotionRunner(self)
 
     # --- Lebenszyklus ------------------------------------------------------------
@@ -206,7 +209,7 @@ class AutomationEngine:
         for entity_id in ids:
             if (s := self.hass.states.get(entity_id)) is not None:
                 states[entity_id] = {"state": s.state, "attributes": dict(s.attributes)}
-        return room_state_from(states, room)
+        return room_state_from(states, room, with_outside=True)
 
     # --- Ereignisse der Bridge ------------------------------------------------------
 
@@ -241,6 +244,14 @@ class AutomationEngine:
             return
         key = automation["room_area_id"]
         now = self.hass.loop.time()
+        if gesture_action(automation.get("options"), gesture).get("action") == "scene_step":
+            # Szenen: eine je Drehbewegung, Rastungen kurz danach zählen nicht
+            if now - self._scene_step_at.get(key, -SCENE_STEP_COOLDOWN) < SCENE_STEP_COOLDOWN:
+                self._scene_step_at[key] = now
+                return
+            self._scene_step_at[key] = now
+            self._execute(automation, _rotation(gesture.direction), room)
+            return
         steps = self._coalescer.push(key, gesture.direction * gesture.steps, now)
         if steps is not None:
             self._execute(automation, _rotation(steps), room)
