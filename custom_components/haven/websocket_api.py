@@ -39,7 +39,7 @@ from .commands import (
     supports_identify,
 )
 from .const import DOMAIN, EVENT_DATA_UPDATED, FEATURES, STATE_MAX_PER_SECOND
-from .groupsync import plan_group_sync, plan_room_group
+from .groupsync import plan_group_complete, plan_group_sync, plan_room_group
 from .scenes import (
     attach_looks,
     find_group,
@@ -78,6 +78,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_zigbee_rename,
         ws_zigbee_set_area,
         ws_zigbee_create_room_group,
+        ws_zigbee_complete_room_group,
         ws_zigbee_identify,
         ws_zigbee_interview,
         ws_zigbee_remove,
@@ -615,6 +616,36 @@ async def ws_zigbee_create_room_group(hass: HomeAssistant, bridge: Z2MBridge, ms
         "added": added,
         "failed": failed,
     }
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): "haven/zigbee/complete_room_group", vol.Required("area_id"): str})
+@websocket_api.async_response
+@_z2m_write
+async def ws_zigbee_complete_room_group(hass: HomeAssistant, bridge: Z2MBridge, msg: dict[str, Any]) -> dict[str, Any]:
+    """Nimmt die Zigbee-Lampen eines Bereichs, die in seiner Gruppe fehlen, in die Gruppe auf
+    (``group_missing_lights`` in ``haven/rooms``)."""
+    room = next((r for r in build_rooms(hass, bridge)["rooms"] if r["area_id"] == msg["area_id"]), None)
+    if room is None:
+        raise Z2MError("not_found", f"Unbekannter Bereich {msg['area_id']}")
+    group = room.get("group")
+    if not group:
+        raise Z2MError("no_group", f"{room['name']} hat keine Zigbee-Gruppe")
+    missing = list(group.get("missing") or ())
+    if not missing:
+        return {"ok": True, "group": group.get("friendly_name"), "added": [], "failed": []}
+    added: list[str] = []
+    failed: list[dict[str, str]] = []
+    for topic, payload in plan_group_complete(group, missing, bridge.groups):
+        try:
+            await bridge.async_request(topic, payload)
+            added.append(payload["device"])
+        except Z2MError as err:
+            failed.append({"ieee": payload["device"], "error": err.message})
+    from .automations_runtime import get_engine  # noqa: PLC0415
+
+    get_engine(hass).invalidate_rooms()
+    return {"ok": True, "group": group.get("friendly_name"), "added": added, "failed": failed}
 
 
 @websocket_api.require_admin

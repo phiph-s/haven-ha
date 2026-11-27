@@ -203,9 +203,9 @@ class FakeEngine:
     def room_targets(self, max_age: float | None = None) -> dict[str, Any]:
         return {ROOM.area_id: ROOM}
 
-    def _room_state(self, room: Any) -> Any:
+    def _room_state(self, room: Any, *, with_outside: bool = True) -> Any:
         snap = {e: {"state": s.state, "attributes": dict(s.attributes)} for e in [room.group_entity, *room.lights] if (s := self.hass.states.get(e))}
-        return auto.room_state_from(snap, room)
+        return auto.room_state_from(snap, room, with_outside=with_outside)
 
     def _schedule_save(self) -> None:
         pass
@@ -338,3 +338,21 @@ def test_takeover_from_light_change_fires_event(rig):
     assert hass.errors == []
     assert runner.states["m1"].owner == "manual"
     assert [d["action"] for _, d in hass.bus.fired] == ["motion_on", "takeover"]
+
+
+def test_outside_lamp_on_does_not_block_motion(rig, monkeypatch):
+    """Lampe außerhalb der Gruppe meldet „an“ (z. B. alter Zustand am Wandschalter):
+    das Bewegungslicht schaltet trotzdem ein, und zwar die Lampe außerhalb mit."""
+    room = auto.RoomTarget(
+        "waschraum", "Waschraum", group="ZGWaschraum", group_entity="light.zgwaschraum",
+        lights=["light.lampe_waschraum", "light.wlan"], outside=["light.wlan"],
+    )
+    monkeypatch.setattr(sys.modules[__name__], "ROOM", room)
+    runtime, clock = rig
+    hass, engine, runner = _setup(runtime, clock)
+    hass._states["light.wlan"] = FakeState("on", {"brightness": 200})
+
+    runner.handle_device_state(RADAR, {"presence": True})
+    hass.drain()
+    assert [p.action for p in engine.sent] == ["on"]
+    assert engine.sent[0].services[0][2]["entity_id"] == ["light.wlan"]

@@ -413,6 +413,17 @@ def test_plan_scene_and_brightness_group(targets):
     assert p.mqtt[0][1] == {"state": "OFF"}
 
 
+def test_plan_includes_lamps_outside_group():
+    room = auto.RoomTarget("az", "AZ", group="ZG", lights=["light.z", "light.w", "light.v"], outside=["light.w", "light.v"])
+    p = mo.plan_command(mo.Command("on", light={"mode": "brightness", "brightness": 80, "color_temp": 2700}), room, auto.RoomState(False, 0))
+    assert p.mqtt[0][1]["state"] == "ON"
+    assert p.services == [("light", "turn_on", {"entity_id": ["light.w", "light.v"], "brightness": 80, "transition": 0.0, "color_temp_kelvin": 2700})]
+    p = mo.plan_command(mo.Command("dim", brightness=40, transition=1.0), room, auto.RoomState(True, 80, ["light.z", "light.v"]))
+    assert p.services == [("light", "turn_on", {"entity_id": ["light.v"], "brightness": 40, "transition": 1.0})]
+    p = mo.plan_command(mo.Command("off"), room, auto.RoomState(True, 80))
+    assert p.mqtt[0][1] == {"state": "OFF"} and p.services == [("light", "turn_off", {"entity_id": ["light.w", "light.v"]})]
+
+
 def test_plan_ha_scene_and_fallback_services():
     room = auto.RoomTarget("bad", "Bad", lights=["light.bad_1", "light.bad_2"])
     p = mo.plan_command(mo.Command("on", light={"mode": "scene", "scene_entity": "scene.bad_nacht", "transition": 3}), room, auto.RoomState(False, 0))

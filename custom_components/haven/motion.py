@@ -528,14 +528,21 @@ def _mired(kelvin: int) -> int:
 
 
 def plan_command(cmd: Command, room: RoomTarget, state: RoomState, base_topic: str = "zigbee2mqtt") -> Plan:
-    """Befehl als :class:`~.automations.Plan`: MQTT auf die Raumgruppe, sonst HA-Dienste."""
+    """Befehl als :class:`~.automations.Plan`: MQTT auf die Raumgruppe, sonst HA-Dienste.
+
+    Lampen des Raums außerhalb der Gruppe (WLAN, Matter, fehlende Mitglieder) schaltet
+    der Plan über HA mit.
+    """
     if cmd.kind == "off":
-        return _plan_off(room, state, base_topic)
+        return _plan_off(room, state, base_topic, outside=True)
     if cmd.kind == "dim":
         b = int(cmd.brightness or 1)
         exp = RoomState(True, b, state.lights_on)
         if room.group:
-            return Plan("dim", mqtt=[(_group_topic(base_topic, room.group), {"brightness": b, "transition": cmd.transition or 0})], expected=exp)
+            plan = Plan("dim", mqtt=[(_group_topic(base_topic, room.group), {"brightness": b, "transition": cmd.transition or 0})], expected=exp)
+            if lit := [l for l in room.outside if l in state.lights_on]:
+                plan.services.append(("light", "turn_on", {"entity_id": lit, "brightness": b, "transition": cmd.transition or 0}))
+            return plan
         targets = state.lights_on or room.lights
         if not targets:
             return Plan(note="keine Lichter")
@@ -562,7 +569,13 @@ def plan_command(cmd: Command, room: RoomTarget, state: RoomState, base_topic: s
         payload: dict[str, Any] = {"state": "ON", "brightness": b, "transition": tr}
         if ct:
             payload["color_temp"] = _mired(int(ct))
-        return Plan("on", mqtt=[(_group_topic(base_topic, room.group), payload)], expected=exp)
+        plan = Plan("on", mqtt=[(_group_topic(base_topic, room.group), payload)], expected=exp)
+        if room.outside:
+            data = {"entity_id": list(room.outside), "brightness": b, "transition": tr}
+            if ct:
+                data["color_temp_kelvin"] = int(ct)
+            plan.services.append(("light", "turn_on", data))
+        return plan
     if not room.lights:
         return Plan(note="keine Lichter")
     data: dict[str, Any] = {"entity_id": list(room.lights), "brightness": b, "transition": tr}

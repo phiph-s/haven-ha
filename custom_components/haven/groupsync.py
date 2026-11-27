@@ -145,3 +145,17 @@ def plan_room_group(
     requests: list[tuple[str, dict[str, Any]]] = [("group/add", {"friendly_name": name})]
     requests += [("group/members/add", build_group_member(name, ieee)) for ieee in sorted(room_lights)]
     return {"name": name, "requests": requests}
+
+
+def plan_group_complete(group: dict[str, Any], missing: list[str], groups: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    """Anfragen, um Zigbee-Lampen des Raums, die in seiner Gruppe fehlen, aufzunehmen.
+
+    ``group``: Z2M-Gruppe (``friendly_name``), ``missing``: IEEE-Adressen. Den Endpunkt
+    übernimmt Haven aus einer anderen Gruppe, in der die Lampe schon ist.
+    """
+    name = str(group.get("friendly_name"))
+    requests: list[tuple[str, dict[str, Any]]] = []
+    for ieee in sorted(set(missing)):
+        endpoint = next((ep for g in groups if (ep := _members(g).get(ieee)) is not None), None)
+        requests.append(("group/members/add", build_group_member(name, ieee, endpoint)))
+    return requests

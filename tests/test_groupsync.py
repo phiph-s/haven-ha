@@ -113,3 +113,16 @@ def test_plan_room_group_refuses_without_lights_or_with_group():
     plan = groupsync.plan_room_group("Diele", {"0xa", "0xb"}, groups, set())
     assert plan["error"] == "group_exists"
     assert "Flur" in plan["message"]
+
+
+def test_plan_group_complete_adds_missing_with_known_endpoint():
+    groups = [
+        {"id": 1, "friendly_name": "Raum", "members": [{"ieee_address": "0xa", "endpoint": 11}]},
+        {"id": 2, "friendly_name": "Alle", "members": [{"ieee_address": "0xc", "endpoint": 13}]},
+    ]
+    requests = groupsync.plan_group_complete(groups[0], ["0xc", "0xb", "0xc"], groups)
+    assert requests == [
+        ("group/members/add", {"group": "Raum", "device": "0xb"}),
+        ("group/members/add", {"group": "Raum", "device": "0xc", "endpoint": 13}),
+    ]
+    assert groupsync.plan_group_complete(groups[0], [], groups) == []

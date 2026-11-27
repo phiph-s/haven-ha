@@ -123,7 +123,7 @@ def test_rooms(inventory):
 def test_room_keys(inventory):
     _, result = _build(inventory)
     assert set(result["rooms"][0]) == {
-        "area_id", "name", "floor_id", "icon", "lights", "light_groups", "zigbee_lights", "light_ieee", "outside_lights", "switches",
+        "area_id", "name", "floor_id", "icon", "lights", "light_groups", "zigbee_lights", "light_ieee", "outside_lights", "group_missing_lights", "switches",
         "climate", "motion", "group", "group_entity", "devices",
     }
 

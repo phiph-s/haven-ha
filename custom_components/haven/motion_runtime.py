@@ -148,7 +148,7 @@ class MotionRunner:
         state.occupied = any(self._device_active(aid, ieee) for ieee in automation["devices"]) or any(
             mo.detector_active((s := self.hass.states.get(d)) and s.state) for d in detectors
         )
-        if room is not None and state.owner == "manual" and self.engine._room_state(room).on is False:  # noqa: SLF001
+        if room is not None and state.owner == "manual" and self.engine._room_state(room, with_outside=False).on is False:  # noqa: SLF001
             # Licht ist aus (z. B. während des Neustarts ausgeschaltet): niemandem mehr
             state.owner, state.deadline, state.warn_at, state.warned, state.applied = "none", None, None, False, None
             self.engine.runtime.setdefault("motion", {})[aid] = state.to_dict()
@@ -161,7 +161,7 @@ class MotionRunner:
     # --- Umgebung -------------------------------------------------------------------
 
     def _env(self, automation: dict[str, Any], room: RoomTarget) -> mo.MotionEnv:
-        light: RoomState = self.engine._room_state(room)  # noqa: SLF001
+        light: RoomState = self.engine._room_state(room, with_outside=False)  # noqa: SLF001
         lux_entity = (self._resolved.get(automation["id"]) or {}).get("lux")
         lux = mo.parse_lux(s.state) if lux_entity and (s := self.hass.states.get(lux_entity)) else None
         now = dt_util.now()
@@ -298,7 +298,7 @@ class MotionRunner:
         for cmd in commands:
             if cmd.kind == "notify":
                 continue
-            plan = mo.plan_command(cmd, room, self.engine._room_state(room), base)  # noqa: SLF001
+            plan = mo.plan_command(cmd, room, self.engine._room_state(room, with_outside=False), base)  # noqa: SLF001
             if plan.expected is not None:
                 self.engine._estimates[room.area_id] = (time.monotonic(), plan.expected)  # noqa: SLF001
             if plan.scene is not None:

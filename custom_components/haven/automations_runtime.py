@@ -213,7 +213,9 @@ class AutomationEngine:
         await get_storage(self.hass).async_get_scene_looks()  # Szenen-Speicher laden
         self.invalidate_rooms()
 
-    def _room_state(self, room: RoomTarget) -> RoomState:
+    def _room_state(self, room: RoomTarget, *, with_outside: bool = True) -> RoomState:
+        """Zustand des Raums. ``with_outside=False``: nur die Gruppe zählt (Bewegungslicht,
+        sonst hielte eine Lampe außerhalb mit altem „an“ den Raum für beleuchtet)."""
         estimate = self._estimates.get(room.area_id)
         if estimate and time.monotonic() - estimate[0] < _ESTIMATE_TTL:
             return estimate[1]
@@ -222,7 +224,7 @@ class AutomationEngine:
         for entity_id in ids:
             if (s := self.hass.states.get(entity_id)) is not None:
                 states[entity_id] = {"state": s.state, "attributes": dict(s.attributes)}
-        return room_state_from(states, room, with_outside=True)
+        return room_state_from(states, room, with_outside=with_outside)
 
     # --- Ereignisse der Bridge ------------------------------------------------------
 

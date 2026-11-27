@@ -225,6 +225,8 @@ def assemble_rooms(
             for l in room["lights"]
             if not room["group"] or l not in room["light_ieee"] or room["light_ieee"][l] in missing
         ]
+        # Zigbee-Lampen des Raums, die in der Gruppe fehlen (``haven/zigbee/complete_room_group``)
+        room["group_missing_lights"] = sorted(l for l, ieee in room["light_ieee"].items() if ieee in missing)
         for key in CLIMATE_CLASSES:
             room["climate"][key] = sorted(set(room["climate"][key]))
         room["light_groups"].sort(key=lambda g: g["entity_id"])
